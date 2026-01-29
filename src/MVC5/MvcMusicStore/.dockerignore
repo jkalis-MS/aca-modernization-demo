@@ -1,0 +1,37 @@
+# Build artifacts
+bin/
+obj/
+out/
+
+# Visual Studio cache/options
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet packages (will be restored during build)
+packages/
+!packages/packages.config
+
+# IDE files
+.vscode/
+.idea/
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Test results
+TestResults/
+
+# Database files
+*.sdf
+*.mdf
+*.ldf
+
+# Application data
+App_Data/
