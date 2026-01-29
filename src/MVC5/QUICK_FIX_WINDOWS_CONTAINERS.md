@@ -65,6 +65,23 @@ You should see:
 
 This time it should work! ??
 
+## Common Build Issues
+
+### Issue: "Cannot determine the packages folder to restore NuGet packages"
+
+**Error message:**
+```
+Cannot determine the packages folder to restore NuGet packages. 
+Please specify either -PackagesDirectory or -SolutionDirectory.
+```
+
+**Solution:** This has been fixed in the Dockerfile. If you still see this error, make sure you have the latest Dockerfile that includes `-PackagesDirectory` in the nuget restore command.
+
+The correct line should be:
+```dockerfile
+RUN nuget restore MvcMusicStore.csproj -PackagesDirectory .\packages
+```
+
 ## Why Does This Happen?
 
 - Docker Desktop defaults to **Linux containers** because most containers are Linux-based

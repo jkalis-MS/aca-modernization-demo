@@ -2,23 +2,23 @@
 
 # Build stage
 FROM mcr.microsoft.com/dotnet/framework/sdk:4.8 AS build
-WORKDIR /app
+WORKDIR /src
 
-# Copy project file and restore dependencies
-COPY *.csproj ./
-COPY packages.config ./
-RUN nuget restore
+# Copy everything and restore
+COPY . ./MvcMusicStore/
+WORKDIR /src/MvcMusicStore
+RUN nuget restore packages.config -PackagesDirectory C:\src\packages
 
-# Copy everything else and build
-COPY . ./
-RUN msbuild MvcMusicStore.csproj /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=C:\app\out /t:WebPublish
+# Build the project (first compile, then publish)
+RUN msbuild MvcMusicStore.csproj /p:Configuration=Release /t:Build
+RUN msbuild MvcMusicStore.csproj /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=C:\publish /t:WebPublish
 
 # Runtime stage
 FROM mcr.microsoft.com/dotnet/framework/aspnet:4.8 AS runtime
 WORKDIR /inetpub/wwwroot
 
 # Copy published application from build stage
-COPY --from=build C:/app/out/_PublishedWebsites/MvcMusicStore .
+COPY --from=build C:/publish/ .
 
 # Expose port 80 for the application
 EXPOSE 80

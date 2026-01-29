@@ -4,12 +4,17 @@ Your application has been successfully prepared for Docker containerization.
 
 ## ?? Got a Build Error?
 
-If you see this error:
-```
-ERROR: no match for platform in manifest: not found
+### Error: "no match for platform in manifest"
+Docker is in Linux mode. Read `QUICK_FIX_WINDOWS_CONTAINERS.md` for the 2-minute solution!
+
+### Error: "Cannot determine the packages folder"
+? **Fixed!** This has been resolved in the Dockerfile. Try building again with:
+```powershell
+.\build-docker-image.ps1
 ```
 
-**Quick Fix:** Docker is in Linux mode. Read `QUICK_FIX_WINDOWS_CONTAINERS.md` for the 2-minute solution!
+### Other Build Issues?
+See `BUILD_TROUBLESHOOTING.md` for comprehensive troubleshooting.
 
 ## ?? Quick Start
 

@@ -216,7 +216,14 @@ Should return: `windows` (not `linux`)
 
 ### Problem: Build fails with NuGet errors
 
+**Error:** `Cannot determine the packages folder to restore NuGet packages`
+
 **Solution:**
+1. This has been fixed in the Dockerfile
+2. Make sure you're using the latest Dockerfile
+3. The Dockerfile should include: `RUN nuget restore MvcMusicStore.csproj -PackagesDirectory .\packages`
+
+**Other NuGet issues:**
 1. Check internet connection
 2. Rebuild without cache: `.\build-docker-image.ps1 -NoBuildCache`
 3. Ensure packages.config exists in MvcMusicStore folder
