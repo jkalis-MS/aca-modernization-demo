@@ -49,7 +49,7 @@ namespace MvcMusicStore.Models
                     DateCreated = DateTime.Now
                 };
 
-                _db.Carts.Add(cartItem);
+                _db.Add<Cart>(cartItem);
             }
             else
             {
@@ -76,7 +76,7 @@ namespace MvcMusicStore.Models
                 }
                 else
                 {
-                    _db.Carts.Remove(cartItem);
+                    _db.Remove<Cart>(cartItem);
                 }
 
             }
@@ -88,9 +88,9 @@ namespace MvcMusicStore.Models
         {
             var cartItems = _db.Carts.Where(cart => cart.CartId == ShoppingCartId);
 
-            foreach (var cartItem in cartItems)
+            foreach (var cartItem in cartItems.ToList())
             {
-                _db.Carts.Remove(cartItem);
+                _db.Remove<Cart>(cartItem);
             }
 
         }
@@ -131,7 +131,7 @@ namespace MvcMusicStore.Models
             // Iterate over the items in the cart, adding the order details for each
             foreach (var item in cartItems)
             {
-                var album = _db.Albums.Find(item.AlbumId);
+                var album = _db.Albums.FirstOrDefault(a => a.AlbumId == item.AlbumId);
 
                 var orderDetail = new OrderDetail
                 {
@@ -144,7 +144,7 @@ namespace MvcMusicStore.Models
                 // Set the order total of the shopping cart
                 orderTotal += (item.Count * item.Album.Price);
 
-                _db.OrderDetails.Add(orderDetail);
+                _db.Add<OrderDetail>(orderDetail);
             }
 
             // Set the order's total to the orderTotal count

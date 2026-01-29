@@ -14,6 +14,6 @@ namespace MvcMusicStore.Models
         [DataType(DataType.DateTime)]
         public DateTime DateCreated { get; set; }
 
-        public virtual Album Album  { get; set; }
+        public Album Album  { get; set; }
     }
 }

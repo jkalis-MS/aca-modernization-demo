@@ -26,9 +26,14 @@ namespace MvcMusicStore.Controllers
 
         public ActionResult Browse(string genre)
         {
-            // Retrieve Genre genre and its Associated associated Albums albums from database
+            // Retrieve Genre and its Associated Albums from database
             var genreModel = storeDB.Genres.Include("Albums")
-                .Single(g => g.Name == genre);
+                .SingleOrDefault(g => g.Name == genre);
+            
+            if (genreModel == null)
+            {
+                return HttpNotFound();
+            }
 
             return View(genreModel);
         }
@@ -36,6 +41,11 @@ namespace MvcMusicStore.Controllers
         public ActionResult Details(int id) 
         {
             var album = storeDB.Albums.Find(id);
+            
+            if (album == null)
+            {
+                return HttpNotFound();
+            }
 
             return View(album);
         }
@@ -43,11 +53,10 @@ namespace MvcMusicStore.Controllers
         [ChildActionOnly]
         public ActionResult GenreMenu()
         {
+            // For in-memory store, just return top 9 genres alphabetically
+            // In a real scenario with EF, this would order by album sales
             var genres = storeDB.Genres
-                .OrderByDescending(
-                    g => g.Albums.Sum(
-                    a => a.OrderDetails.Sum(
-                    od => od.Quantity)))
+                .OrderBy(g => g.Name)
                 .Take(9)
                 .ToList();
 

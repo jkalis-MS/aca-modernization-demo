@@ -17,7 +17,8 @@ namespace MvcMusicStore
             RouteConfig.RegisterRoutes(RouteTable.Routes);
             BundleConfig.RegisterBundles(BundleTable.Bundles);
 
-            System.Data.Entity.Database.SetInitializer(new MvcMusicStore.Models.SampleData());
+            // Initialize in-memory data store
+            var dataStore = MvcMusicStore.Models.InMemoryDataStore.Instance;
         }
     }
 }
