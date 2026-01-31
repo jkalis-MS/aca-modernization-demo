@@ -35,7 +35,7 @@ NuGet packages used across all selected projects or their dependencies that need
 | Microsoft.AspNet.Identity.EntityFramework | 1.0.0           |             | Replace with ASP.NET Core Identity with EF Core                |
 | Microsoft.AspNet.Identity.Owin            | 1.0.0           |             | Replace with ASP.NET Core Identity (security vulnerability)    |
 | Microsoft.AspNet.Mvc                      | 5.0.0           |             | Functionality included with ASP.NET Core framework             |
-| Microsoft.AspNet.Razor                    | 3.0.0           |             | Functionality included with ASP.NET Core framework             |
+| Microsoft.AspNet.Razor                    | 3.0.0           |             | Functionaligty included with ASP.NET Core framework             |
 | Microsoft.AspNet.Web.Optimization         | 1.1.1           |             | Not supported - remove bundling, use direct script/style tags  |
 | Microsoft.AspNet.WebPages                 | 3.0.0           |             | Functionality included with ASP.NET Core framework             |
 | Microsoft.EntityFrameworkCore             |                 | 9.0.0       | Replacement for EntityFramework 6                              |
