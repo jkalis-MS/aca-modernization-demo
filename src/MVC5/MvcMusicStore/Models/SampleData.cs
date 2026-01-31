@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Web;
-using System.Data.Entity;
 
 namespace MvcMusicStore.Models
 {
@@ -16,7 +15,6 @@ namespace MvcMusicStore.Models
             var artists = AddArtists(context);
             AddAlbums(context, imgUrl, genres, artists);
 
-            context.SaveChanges();
         }
 
         private static void AddAlbums(MusicStoreEntities context, string imgUrl, List<Genre> genres, List<Artist> artists)
@@ -794,7 +792,7 @@ namespace MvcMusicStore.Models
                 new Artist { Name = "אריק אינשטיין"}
             };
             artists.ForEach(s => context.Artists.Add(s));
-            context.SaveChanges();
+
             return artists;
         }
 
@@ -820,7 +818,7 @@ namespace MvcMusicStore.Models
             };
 
             genres.ForEach(s => context.Genres.Add(s));
-            context.SaveChanges();
+
             return genres;
         }
     }
