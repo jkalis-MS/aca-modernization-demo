@@ -2,21 +2,27 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Web;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace MvcMusicStore.Controllers
 {
     public class StoreController : Controller
     {
-        MusicStoreEntities storeDB = new MusicStoreEntities();
+        private readonly MusicStoreEntities storeDB;
+
+        public StoreController(MusicStoreEntities context)
+        {
+            storeDB = context;
+        }
+
         //
         // GET: /Store/
 
-        public ActionResult Index()
+        public async Task<ActionResult> Index()
         {
-            var genres = storeDB.Genres.ToList();
-
+            var genres = await storeDB.Genres.ToListAsync();
             return View(genres);
         }
 
@@ -24,33 +30,31 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /Store/Browse?genre=Disco
 
-        public ActionResult Browse(string genre)
+        public async Task<ActionResult> Browse(string genre)
         {
-            // Retrieve Genre genre and its Associated associated Albums albums from database
-            var genreModel = storeDB.Genres.Include("Albums")
-                .Single(g => g.Name == genre);
+            // Retrieve Genre and its Associated Albums from database
+            var genreModel = await storeDB.Genres.Include("Albums")
+                .SingleAsync(g => g.Name == genre);
 
             return View(genreModel);
         }
 
-        public ActionResult Details(int id) 
+        public async Task<ActionResult> Details(int id) 
         {
-            var album = storeDB.Albums.Find(id);
-
+            var album = await storeDB.Albums.FindAsync(id);
             return View(album);
         }
 
-        // TODO Child actions should be replaced with view components. For more details see https://docs.microsoft.com/aspnet/core/mvc/views/view-components and https://www.davepaquette.com/archive/2016/01/02/goodbye-child-actions-hello-view-components.aspx.
-        [ChildActionOnly]
-        public ActionResult GenreMenu()
+        // Converted from ChildAction to regular action - can be called via AJAX or as partial view
+        public async Task<ActionResult> GenreMenu()
         {
-            var genres = storeDB.Genres
+            var genres = await storeDB.Genres
                 .OrderByDescending(
                     g => g.Albums.Sum(
                     a => a.OrderDetails.Sum(
                     od => od.Quantity)))
                 .Take(9)
-                .ToList();
+                .ToListAsync();
 
             return PartialView(genres);
         }

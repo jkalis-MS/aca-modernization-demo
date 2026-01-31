@@ -1,13 +1,20 @@
 ﻿using System.Linq;
+using System.Threading.Tasks;
 using MvcMusicStore.Models;
 using MvcMusicStore.ViewModels;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace MvcMusicStore.Controllers
 {
     public class ShoppingCartController : Controller
     {
-        MusicStoreEntities storeDB = new MusicStoreEntities();
+        private readonly MusicStoreEntities storeDB;
+
+        public ShoppingCartController(MusicStoreEntities context)
+        {
+            storeDB = context;
+        }
 
         //
         // GET: /ShoppingCart/
@@ -30,19 +37,15 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /ShoppingCart/AddToCart/5
 
-        public ActionResult AddToCart(int id)
+        public async Task<ActionResult> AddToCart(int id)
         {
-
             // Retrieve the album from the database
-            var addedAlbum = storeDB.Albums
-                .Single(album => album.AlbumId == id);
+            var addedAlbum = await storeDB.Albums
+                .SingleAsync(album => album.AlbumId == id);
 
             // Add it to the shopping cart
             var cart = ShoppingCart.GetCart(storeDB, this.HttpContext);
-
             cart.AddToCart(addedAlbum);
-
-            // storeDB.SaveChanges(); // Removed because MusicStoreEntities no longer supports SaveChanges (EntityFramework removed)
 
             // Go back to the main store page for more shopping
             return RedirectToAction("Index");
@@ -52,24 +55,23 @@ namespace MvcMusicStore.Controllers
         // AJAX: /ShoppingCart/RemoveFromCart/5
 
         [HttpPost]
-        public ActionResult RemoveFromCart(int id)
+        public async Task<ActionResult> RemoveFromCart(int id)
         {
             // Retrieve the current user's shopping cart
             var cart = ShoppingCart.GetCart(storeDB, this.HttpContext);
 
             // Get the name of the album to display confirmation
-            string albumName = storeDB.Carts
-                .Single(item => item.RecordId == id).Album.Title;
+            var cartItem = await storeDB.Carts
+                .Include(c => c.Album)
+                .SingleAsync(item => item.RecordId == id);
+            string albumName = cartItem.Album.Title;
 
             // Remove from cart
             int itemCount = cart.RemoveFromCart(id);
 
-            // storeDB.SaveChanges(); // Removed because MusicStoreEntities no longer supports SaveChanges (EntityFramework removed)
-
             string removed = (itemCount > 0) ? " 1 copy of " : string.Empty;
 
             // Display the confirmation message
-
             var results = new ShoppingCartRemoveViewModel
             {
                 Message = removed + albumName +
@@ -83,8 +85,7 @@ namespace MvcMusicStore.Controllers
             return Json(results);
         }
 
-        // TODO Child actions should be replaced with view components. For more details see https://docs.microsoft.com/aspnet/core/mvc/views/view-components and https://www.davepaquette.com/archive/2016/01/02/goodbye-child-actions-hello-view-components.aspx.
-        [ChildActionOnly]
+        // Converted from ChildAction to regular action - can be called via AJAX or as partial view
         public ActionResult CartSummary()
         {
             var cart = ShoppingCart.GetCart(storeDB, this.HttpContext);
@@ -100,3 +101,4 @@ namespace MvcMusicStore.Controllers
         }
     }
 }
+

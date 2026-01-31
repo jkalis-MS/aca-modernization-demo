@@ -1,14 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Web;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace MvcMusicStore.Models
 {
     public partial class ShoppingCart
     {
-        MusicStoreEntities _db;
+        private readonly MusicStoreEntities _db;
         string ShoppingCartId { get; set; }
 
         public ShoppingCart(MusicStoreEntities db)
@@ -18,7 +19,7 @@ namespace MvcMusicStore.Models
 
         public const string CartSessionKey = "CartId";
 
-        public static ShoppingCart GetCart(MusicStoreEntities db, HttpContextBase context)
+        public static ShoppingCart GetCart(MusicStoreEntities db, HttpContext context)
         {
             var cart = new ShoppingCart(db);
             cart.ShoppingCartId = cart.GetCartId(context);
@@ -56,6 +57,8 @@ namespace MvcMusicStore.Models
                 // If the item does exist in the cart, then add one to the quantity
                 cartItem.Count++;
             }
+
+            _db.SaveChanges();
         }
 
         public int RemoveFromCart(int id)
@@ -79,6 +82,7 @@ namespace MvcMusicStore.Models
                     _db.Carts.Remove(cartItem);
                 }
 
+                _db.SaveChanges();
             }
 
             return itemCount;
@@ -93,11 +97,15 @@ namespace MvcMusicStore.Models
                 _db.Carts.Remove(cartItem);
             }
 
+            _db.SaveChanges();
         }
 
         public List<Cart> GetCartItems()
         {
-            return _db.Carts.Where(cart => cart.CartId == ShoppingCartId).ToList();
+            return _db.Carts
+                .Include(c => c.Album)
+                .Where(cart => cart.CartId == ShoppingCartId)
+                .ToList();
         }
 
         public int GetCount()
@@ -157,26 +165,29 @@ namespace MvcMusicStore.Models
             return order.OrderId;
         }
 
-        // We're using HttpContextBase to allow access to cookies.
-        public string GetCartId(HttpContextBase context)
+        // We're using HttpContext to allow access to session.
+        public string GetCartId(HttpContext context)
         {
-            if (context.Session[CartSessionKey] == null)
+            var cartId = context.Session.GetString(CartSessionKey);
+            
+            if (string.IsNullOrWhiteSpace(cartId))
             {
-                if (!string.IsNullOrWhiteSpace(context.User.Identity.Name))
+                if (!string.IsNullOrWhiteSpace(context.User?.Identity?.Name))
                 {
-                    context.Session[CartSessionKey] = context.User.Identity.Name;
+                    cartId = context.User.Identity.Name;
                 }
                 else
                 {
                     // Generate a new random GUID using System.Guid class
                     Guid tempCartId = Guid.NewGuid();
-
-                    // Send tempCartId back to client as a cookie
-                    context.Session[CartSessionKey] = tempCartId.ToString();
+                    cartId = tempCartId.ToString();
                 }
+
+                // Send cartId back to session
+                context.Session.SetString(CartSessionKey, cartId);
             }
 
-            return context.Session[CartSessionKey].ToString();
+            return cartId;
         }
 
         // When a user has logged in, migrate their shopping cart to
@@ -190,6 +201,7 @@ namespace MvcMusicStore.Models
                 item.CartId = userName;
             }
 
+            _db.SaveChanges();
         }
     }
 }
