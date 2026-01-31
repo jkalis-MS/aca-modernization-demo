@@ -42,7 +42,7 @@ namespace MvcMusicStore.Controllers
 
             cart.AddToCart(addedAlbum);
 
-            storeDB.SaveChanges();
+            // storeDB.SaveChanges(); // Removed because MusicStoreEntities no longer supports SaveChanges (EntityFramework removed)
 
             // Go back to the main store page for more shopping
             return RedirectToAction("Index");
