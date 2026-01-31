@@ -4,7 +4,6 @@ using System.ComponentModel.DataAnnotations;
 
 namespace MvcMusicStore.Models
 {
-    [Bind(Include = "FirstName,LastName,Address,City,State,PostalCode,Country,Phone,Email")]
     public class Order
     {
         [ScaffoldColumn(false)]

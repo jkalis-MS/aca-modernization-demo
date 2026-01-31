@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Linq;
+using System.Threading.Tasks;
 using MvcMusicStore.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
@@ -9,8 +10,13 @@ namespace MvcMusicStore.Controllers
     [Authorize]
     public class CheckoutController : Controller
     {
-        MusicStoreEntities storeDB = new MusicStoreEntities();
+        private readonly MusicStoreEntities storeDB;
         const string PromoCode = "FREE";
+
+        public CheckoutController(MusicStoreEntities context)
+        {
+            storeDB = context;
+        }
 
         //
         // GET: /Checkout/
@@ -24,37 +30,36 @@ namespace MvcMusicStore.Controllers
         // POST: /Checkout/AddressAndPayment
 
         [HttpPost]
-        public ActionResult AddressAndPayment(FormCollection values)
+        [ValidateAntiForgeryToken]
+        public async Task<ActionResult> AddressAndPayment(Order order, string promoCode)
         {
-            var order = new Order();
-            TryUpdateModel(order);
+            if (!ModelState.IsValid)
+            {
+                return View(order);
+            }
 
             try
             {
-                if (string.Equals(values["PromoCode"], PromoCode,
-                    StringComparison.OrdinalIgnoreCase) == false)
+                if (!string.Equals(promoCode, PromoCode, StringComparison.OrdinalIgnoreCase))
                 {
+                    ModelState.AddModelError("PromoCode", "Invalid promo code");
                     return View(order);
                 }
-                else
-                {
-                    order.Username = User.Identity.Name;
-                    order.OrderDate = DateTime.Now;
 
-                    //Add the Order
-                    storeDB.Orders.Add(order);
+                order.Username = User.Identity.Name;
+                order.OrderDate = DateTime.Now;
 
-                    //Process the order
-                    var cart = ShoppingCart.GetCart(storeDB, this.HttpContext);
-                    cart.CreateOrder(order);
+                //Add the Order
+                storeDB.Orders.Add(order);
 
-                    // Save all changes
-                    storeDB.SaveChanges();
+                //Process the order
+                var cart = ShoppingCart.GetCart(storeDB, this.HttpContext);
+                cart.CreateOrder(order);
 
-                    return RedirectToAction("Complete",
-                        new { id = order.OrderId });
-                }
+                // Save all changes
+                await storeDB.SaveChangesAsync();
 
+                return RedirectToAction("Complete", new { id = order.OrderId });
             }
             catch
             {
@@ -66,12 +71,12 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /Checkout/Complete
 
-        public ActionResult Complete(int id)
+        public async Task<ActionResult> Complete(int id)
         {
             // Validate customer owns this order
-            bool isValid = storeDB.Orders.Any(
+            bool isValid = await Task.Run(() => storeDB.Orders.Any(
                 o => o.OrderId == id &&
-                o.Username == User.Identity.Name);
+                o.Username == User.Identity.Name));
 
             if (isValid)
             {
