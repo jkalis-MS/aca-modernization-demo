@@ -64,7 +64,7 @@ namespace MvcMusicStore.Controllers
             // Remove from cart
             int itemCount = cart.RemoveFromCart(id);
 
-            storeDB.SaveChanges();
+            // storeDB.SaveChanges(); // Removed because MusicStoreEntities no longer supports SaveChanges (EntityFramework removed)
 
             string removed = (itemCount > 0) ? " 1 copy of " : string.Empty;
 
