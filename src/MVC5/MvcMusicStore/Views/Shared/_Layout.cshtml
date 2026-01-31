@@ -23,10 +23,10 @@
             <div class="navbar-collapse collapse">
                 <ul class="nav navbar-nav">
                     <li>@Html.ActionLink("Home", "Index", "Home")</li>
-                    @Html.Action("GenreMenu", "Store")
-                    @Html.Action("CartSummary", "ShoppingCart")
+                    @* TODO: Convert child actions to View Components - @Html.Action("GenreMenu", "Store") *@
+                    @* TODO: Convert child actions to View Components - @Html.Action("CartSummary", "ShoppingCart") *@
                 </ul>
-                @Html.Partial("_LoginPartial")
+                @await Html.PartialAsync("_LoginPartial")
             </div>
         </div>
     </div>

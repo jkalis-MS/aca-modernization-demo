@@ -1,5 +1,4 @@
 ﻿@using MvcMusicStore.Models;
-@using Microsoft.AspNet.Identity;
 @{
     ViewBag.Title = "Manage Account";
 }
@@ -11,16 +10,16 @@
     <div class="col-md-12">
         @if (ViewBag.HasLocalPassword)
         {
-            @Html.Partial("_ChangePasswordPartial")
+            @await Html.PartialAsync("_ChangePasswordPartial")
         }
         else
         {
-            @Html.Partial("_SetPasswordPartial")
+            @await Html.PartialAsync("_SetPasswordPartial")
         }
 
         <section id="externalLogins">
-            @Html.Action("RemoveAccountList")
-            @Html.Partial("_ExternalLoginsListPartial", new { Action = "LinkLogin", ReturnUrl = ViewBag.ReturnUrl })
+            @* TODO: Convert child action to View Component - @Html.Action("RemoveAccountList") *@
+            @await Html.PartialAsync("_ExternalLoginsListPartial", new { Action = "LinkLogin", ReturnUrl = ViewBag.ReturnUrl })
         </section>
     </div>
 </div>
@@ -28,3 +27,4 @@
     <script src="~/Scripts/jquery.validate.js"></script>
     <script src="~/Scripts/jquery.validate.unobtrusive.js"></script>
 }
+
