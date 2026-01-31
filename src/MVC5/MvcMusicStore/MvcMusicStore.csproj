@@ -5,24 +5,17 @@
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="System.ComponentModel.DataAnnotations" />
-    <Reference Include="System.Configuration" />
-    <PackageReference Include="Antlr" Version="3.4.1.9004" />
-    <PackageReference Include="bootstrap" Version="3.0.0" />
-    <PackageReference Include="EntityFramework" Version="6.0.0" />
-    <PackageReference Include="jQuery" Version="1.10.2" />
-    <PackageReference Include="jQuery.Validation" Version="1.11.1" />
+    <PackageReference Include="bootstrap" Version="5.3.8" />
+    <PackageReference Include="jQuery" Version="3.7.1" />
+    <PackageReference Include="jQuery.Validation" Version="1.21.0" />
     <PackageReference Include="Microsoft.jQuery.Unobtrusive.Validation" Version="3.0.0" />
-    <PackageReference Include="Microsoft.Owin.Security.Facebook" Version="2.0.0" />
-    <PackageReference Include="Microsoft.Owin.Security.Google" Version="2.0.0" />
-    <PackageReference Include="Microsoft.Owin.Security.MicrosoftAccount" Version="2.0.0" />
-    <PackageReference Include="Microsoft.Owin.Security.Twitter" Version="2.0.0" />
     <PackageReference Include="Modernizr" Version="2.6.2" />
-    <PackageReference Include="Newtonsoft.Json" Version="5.0.6" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="Respond" Version="1.2.0" />
     <PackageReference Include="WebGrease" Version="1.5.2" />
+    <PackageReference Include="Microsoft.AspNetCore.SystemWebAdapters" Version="2.2.1" />
+    <PackageReference Include="Antlr4" Version="4.6.6" />
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="10.0.2" />
   </ItemGroup>
   <ItemGroup>
     <Compile Update="Global.asax.cs">
