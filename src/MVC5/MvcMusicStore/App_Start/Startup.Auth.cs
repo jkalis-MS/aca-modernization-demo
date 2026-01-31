@@ -1,8 +1,4 @@
-﻿using Microsoft.AspNet.Identity;
-using Microsoft.Owin;
-using Microsoft.Owin.Security.Cookies;
-using Owin;
-
+﻿
 namespace MvcMusicStore
 {
     public partial class Startup

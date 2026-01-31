@@ -4,8 +4,10 @@ using System.Data;
 using System.Data.Entity;
 using System.Linq;
 using System.Web;
-using System.Web.Mvc;
 using MvcMusicStore.Models;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc.Rendering;
 
 namespace MvcMusicStore.Controllers
 {
@@ -32,7 +34,7 @@ namespace MvcMusicStore.Controllers
             Album album = db.Albums.Find(id);
             if (album == null)
             {
-                return HttpNotFound();
+                return NotFound();
             }
             return View(album);
         }
@@ -73,7 +75,7 @@ namespace MvcMusicStore.Controllers
             Album album = db.Albums.Find(id);
             if (album == null)
             {
-                return HttpNotFound();
+                return NotFound();
             }
             ViewBag.GenreId = new SelectList(db.Genres, "GenreId", "Name", album.GenreId);
             ViewBag.ArtistId = new SelectList(db.Artists, "ArtistId", "Name", album.ArtistId);
@@ -105,7 +107,7 @@ namespace MvcMusicStore.Controllers
             Album album = db.Albums.Find(id);
             if (album == null)
             {
-                return HttpNotFound();
+                return NotFound();
             }
             return View(album);
         }

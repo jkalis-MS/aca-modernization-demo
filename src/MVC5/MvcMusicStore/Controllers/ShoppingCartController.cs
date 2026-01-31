@@ -1,7 +1,7 @@
 ﻿using System.Linq;
-using System.Web.Mvc;
 using MvcMusicStore.Models;
 using MvcMusicStore.ViewModels;
+using Microsoft.AspNetCore.Mvc;
 
 namespace MvcMusicStore.Controllers
 {
@@ -83,6 +83,7 @@ namespace MvcMusicStore.Controllers
             return Json(results);
         }
 
+        // TODO Child actions should be replaced with view components. For more details see https://docs.microsoft.com/aspnet/core/mvc/views/view-components and https://www.davepaquette.com/archive/2016/01/02/goodbye-child-actions-hello-view-components.aspx.
         [ChildActionOnly]
         public ActionResult CartSummary()
         {

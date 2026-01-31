@@ -1,9 +1,4 @@
-﻿using Microsoft.AspNet.Identity;
-using Microsoft.AspNet.Identity.EntityFramework;
-using Microsoft.Owin;
-using Microsoft.Owin.Security.Cookies;
-using MvcMusicStore.Models;
-using Owin;
+﻿using MvcMusicStore.Models;
 using System.Configuration;
 using System.Threading.Tasks;
 
@@ -25,6 +20,7 @@ namespace MvcMusicStore
             string _role = "Administrator";
 
             var context = new ApplicationDbContext();
+            // TODO ASP.NET identity should be replaced with ASP.NET Core identity. For more details see https://docs.microsoft.com/aspnet/core/migration/identity.
             var userManager = new UserManager<ApplicationUser>(new UserStore<ApplicationUser>(context));
             var roleManager = new RoleManager<IdentityRole>(new RoleStore<IdentityRole>(context));
 
