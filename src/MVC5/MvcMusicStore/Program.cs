@@ -19,6 +19,8 @@ var app = builder.Build();
 
 if (!app.Environment.IsDevelopment())
 {
+    app.UseExceptionHandler("/Home/Error"); // Global error handler
+    app.UseStatusCodePagesWithReExecute("/Home/StatusErrorCode", "?code={0}");
     app.UseHsts();
 }
 

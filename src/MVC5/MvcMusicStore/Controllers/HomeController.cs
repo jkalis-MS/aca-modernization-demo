@@ -31,5 +31,15 @@ namespace MvcMusicStore.Controllers
                 .Take(count)
                 .ToList();
         }
+
+        public IActionResult Error()
+        {
+            return View();
+        }
+
+        public IActionResult StatusErrorCode(int code)
+        {
+            return View("StatusErrorCode", code);
+        }
     }
 }
