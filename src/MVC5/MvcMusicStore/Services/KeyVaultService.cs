@@ -1,6 +1,11 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using Azure;
 using Azure.Identity;
 using Azure.Security.KeyVault.Secrets;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace MvcMusicStore.Services
 {
