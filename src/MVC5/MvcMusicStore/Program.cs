@@ -6,8 +6,17 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using MvcMusicStore.Models;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure OpenTelemetry with Azure Monitor
+builder.Services.AddOpenTelemetry()
+    .UseAzureMonitor(options =>
+    {
+        // Connection string can be set via configuration or environment variable
+        // options.ConnectionString = builder.Configuration["ApplicationInsights:ConnectionString"];
+    });
 
 // Add services to the container.
 builder.Services.AddControllersWithViews();
