@@ -8,6 +8,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using MvcMusicStore.Models;
 using MvcMusicStore.Data;
+using MvcMusicStore.Services;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Azure.Monitor.OpenTelemetry.Profiler;
 using Azure.Identity;
@@ -44,6 +45,9 @@ if (!string.IsNullOrEmpty(connectionString))
 
 // Add services to the container.
 builder.Services.AddControllersWithViews();
+
+// Register Key Vault Service
+builder.Services.AddSingleton<IKeyVaultService, KeyVaultService>();
 
 // Configure Entity Framework Core with SQL Server
 builder.Services.AddDbContext<MusicStoreEntities>(options =>
