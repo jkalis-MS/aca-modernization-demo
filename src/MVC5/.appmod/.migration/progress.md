@@ -64,13 +64,13 @@
 - [X] Register KeyVaultService in DI container
 - [X] Update appsettings.json with KeyVaultName configuration - Already present
 - [X] Update appsettings.Development.json (remove sensitive data, add KeyVaultName if needed) - Already present
-- [in_progress] Commit: "Integrate Azure Key Vault configuration"
+- [X] Commit: "Integrate Azure Key Vault configuration"
 
 ### Phase 5: Remove Plaintext Credentials
-- [ ] Replace connection strings in appsettings.json with placeholders
-- [ ] Replace Application Insights connection string in appsettings.json
-- [ ] Replace Application Insights connection string in appsettings.Development.json
-- [ ] Commit: "Remove plaintext credentials from configuration files"
+- [X] Replace connection strings in appsettings.json with placeholders
+- [X] Replace Application Insights connection string in appsettings.json
+- [X] Replace Application Insights connection string in appsettings.Development.json
+- [in_progress] Commit: "Remove plaintext credentials from configuration files"
 
 ### Phase 6: Verification and Testing
 - [ ] Run build to verify compilation
