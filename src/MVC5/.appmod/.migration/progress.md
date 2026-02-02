@@ -52,12 +52,12 @@
 - [X] Install Azure.Security.KeyVault.Secrets (4.8.0)
 - [X] Install Azure.Identity (1.14.0)
 - [X] Install Azure.Extensions.AspNetCore.Configuration.Secrets (1.3.2)
-- [in_progress] Commit: "Add Azure Key Vault NuGet packages"
+- [X] Commit: "Add Azure Key Vault NuGet packages"
 
 ### Phase 3: Create Key Vault Service Infrastructure
-- [ ] Create Services/IKeyVaultService.cs interface
-- [ ] Create Services/KeyVaultService.cs implementation
-- [ ] Commit: "Add Key Vault service infrastructure"
+- [X] Create Services/IKeyVaultService.cs interface
+- [X] Create Services/KeyVaultService.cs implementation
+- [in_progress] Commit: "Add Key Vault service infrastructure"
 
 ### Phase 4: Integrate Azure Key Vault Configuration
 - [ ] Update Program.cs to add Key Vault configuration provider
