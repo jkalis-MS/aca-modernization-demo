@@ -5,18 +5,42 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using MvcMusicStore.Models;
+using MvcMusicStore.Data;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
+using Azure.Monitor.OpenTelemetry.Profiler;
+using Azure.Identity;
+using Azure.Extensions.AspNetCore.Configuration.Secrets;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Configure Azure Key Vault integration with Managed Identity
+var keyVaultName = builder.Configuration["KeyVaultName"];
+if (!string.IsNullOrEmpty(keyVaultName))
+{
+    var keyVaultUri = new Uri($"https://{keyVaultName}.vault.azure.net/");
+    
+    // Use DefaultAzureCredential which supports:
+    // - Managed Identity (in Azure)
+    // - Azure CLI (local development)
+    // - Visual Studio (local development)
+    builder.Configuration.AddAzureKeyVault(
+        keyVaultUri,
+        new DefaultAzureCredential());
+}
+
 // Configure OpenTelemetry with Azure Monitor
-builder.Services.AddOpenTelemetry()
-    .UseAzureMonitor(options =>
-    {
-        // Connection string can be set via configuration or environment variable
-        // options.ConnectionString = builder.Configuration["ApplicationInsights:ConnectionString"];
-    });
+var connectionString = builder.Configuration["ApplicationInsights:ConnectionString"];
+if (!string.IsNullOrEmpty(connectionString))
+{
+    builder.Services.AddOpenTelemetry()
+        .UseAzureMonitor(options =>
+        {
+            options.ConnectionString = connectionString;
+        })
+        .AddAzureMonitorProfiler();  // Add Azure Monitor Profiler
+}
 
 // Add services to the container.
 builder.Services.AddControllersWithViews();
@@ -88,5 +112,39 @@ app.UseAuthorization();
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}");
+
+// Seed or recreate the database
+using (var scope = app.Services.CreateScope())
+{
+    var services = scope.ServiceProvider;
+    var logger = services.GetRequiredService<ILogger<Program>>();
+    
+    try
+    {
+        var context = services.GetRequiredService<MusicStoreEntities>();
+        var identityContext = services.GetRequiredService<ApplicationDbContext>();
+        
+        // Check if database recreation is enabled (useful during development)
+        var recreateDatabase = builder.Configuration.GetValue<bool>("Database:RecreateOnStartup", false);
+        
+        if (recreateDatabase)
+        {
+            logger.LogWarning("Database recreation is ENABLED. This will delete all existing data!");
+            await DbSeeder.RecreateAndSeedAsync(context, logger);
+            
+            // Ensure Identity database exists
+            await identityContext.Database.EnsureCreatedAsync();
+        }
+        else
+        {
+            // Normal seeding (only if empty)
+            await DbSeeder.SeedAsync(context);
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "An error occurred while seeding the database.");
+    }
+}
 
 app.Run();

@@ -33,7 +33,8 @@ namespace MvcMusicStore.Controllers
         public async Task<ActionResult> Browse(string genre)
         {
             // Retrieve Genre and its Associated Albums from database
-            var genreModel = await storeDB.Genres.Include("Albums")
+            var genreModel = await storeDB.Genres
+                .Include(g => g.Albums)
                 .SingleAsync(g => g.Name == genre);
 
             return View(genreModel);
@@ -41,7 +42,16 @@ namespace MvcMusicStore.Controllers
 
         public async Task<ActionResult> Details(int id) 
         {
-            var album = await storeDB.Albums.FindAsync(id);
+            var album = await storeDB.Albums
+                .Include(a => a.Genre)
+                .Include(a => a.Artist)
+                .FirstOrDefaultAsync(a => a.AlbumId == id);
+            
+            if (album == null)
+            {
+                return NotFound();
+            }
+            
             return View(album);
         }
 

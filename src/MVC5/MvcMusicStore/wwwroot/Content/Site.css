@@ -3,6 +3,26 @@
     padding-bottom: 20px;
 }
 
+/* .NET Version Banner */
+.dotnet-version-banner {
+    background: linear-gradient(135deg, #5bc0de 0%, #31b0d5 100%);
+    color: #ffffff;
+    padding: 10px 0;
+    margin-top: 50px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.dotnet-version-banner p {
+    margin: 0;
+    font-size: 14px;
+    letter-spacing: 0.5px;
+}
+
+.dotnet-version-banner strong {
+    font-weight: 600;
+    font-size: 16px;
+}
+
 /* Set padding to keep content from hitting the edges */
 .body-content {
     padding-left: 15px;

@@ -23,12 +23,16 @@
             <div class="navbar-collapse collapse">
                 <ul class="nav navbar-nav">
                     <li>@Html.ActionLink("Home", "Index", "Home")</li>
-                    @* TODO: Convert child actions to View Components - @Html.Action("GenreMenu", "Store") *@
+                    @await Component.InvokeAsync("GenreMenu")
                     @* TODO: Convert child actions to View Components - @Html.Action("CartSummary", "ShoppingCart") *@
                 </ul>
                 @await Html.PartialAsync("_LoginPartial")
             </div>
         </div>
+    </div>
+    <div class="alert alert-info text-center" style="margin-top: 50px; margin-bottom: 0; border-radius: 0;">
+        <strong>Running on:</strong> .NET 10.0
+        <span class="text-muted">(Runtime Version: @System.Environment.Version)</span>
     </div>
     <div class="container body-content">
         @RenderBody()
