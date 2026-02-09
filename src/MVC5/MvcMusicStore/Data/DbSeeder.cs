@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
@@ -10,7 +11,7 @@ namespace MvcMusicStore.Data;
 
 public static class DbSeeder
 {
-    public static async Task RecreateAndSeedAsync(MusicStoreEntities context, ILogger logger)
+    public static async Task RecreateAndSeedAsync(MusicStoreEntities context, ILogger logger, string webRootPath = null)
     {
         try
         {
@@ -25,7 +26,7 @@ public static class DbSeeder
             logger.LogInformation("Database recreated with migrations.");
             
             logger.LogInformation("Seeding database with sample data...");
-            await SeedDataAsync(context);
+            await SeedDataAsync(context, webRootPath);
             
             logger.LogInformation("Database recreated and seeded successfully with 100 albums!");
         }
@@ -36,7 +37,7 @@ public static class DbSeeder
         }
     }
 
-    public static async Task SeedAsync(MusicStoreEntities context)
+    public static async Task SeedAsync(MusicStoreEntities context, string webRootPath = null)
     {
         // Check if database already has data
         if (await context.Albums.AnyAsync())
@@ -44,10 +45,10 @@ public static class DbSeeder
             return; // Database has been seeded
         }
 
-        await SeedDataAsync(context);
+        await SeedDataAsync(context, webRootPath);
     }
 
-    private static async Task SeedDataAsync(MusicStoreEntities context)
+    private static async Task SeedDataAsync(MusicStoreEntities context, string webRootPath)
     {
         var genres = new List<Genre>
         {
@@ -267,5 +268,29 @@ public static class DbSeeder
 
         await context.Albums.AddRangeAsync(albums);
         await context.SaveChangesAsync();
+
+        // Generate album art PNGs if webRootPath is available
+        if (!string.IsNullOrEmpty(webRootPath))
+        {
+            var genreMap = await context.Genres.ToDictionaryAsync(g => g.GenreId, g => g.Name);
+            var genreCounter = new Dictionary<int, int>();
+
+            foreach (var album in albums)
+            {
+                if (!genreCounter.TryGetValue(album.GenreId, out var count))
+                    count = 0;
+                genreCounter[album.GenreId] = count + 1;
+
+                var genreName = genreMap.GetValueOrDefault(album.GenreId, "Rock");
+                var fileName = $"album-{album.AlbumId}.png";
+                var filePath = Path.Combine(webRootPath, "Images", "AlbumArt", fileName);
+
+                AlbumArtGenerator.GenerateAlbumArt(filePath, genreName, count);
+
+                album.AlbumArtUrl = $"/Images/AlbumArt/{fileName}";
+            }
+
+            await context.SaveChangesAsync();
+        }
     }
 }

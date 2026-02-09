@@ -138,7 +138,7 @@ using (var scope = app.Services.CreateScope())
             logger.LogWarning("?? Database recreation is ENABLED. This will delete all existing data!");
             
             // Recreate main database
-            await DbSeeder.RecreateAndSeedAsync(context, logger);
+            await DbSeeder.RecreateAndSeedAsync(context, logger, app.Environment.WebRootPath);
             
             // Recreate Identity database
             logger.LogInformation("Recreating Identity database...");
@@ -159,7 +159,7 @@ using (var scope = app.Services.CreateScope())
             
             // Normal seeding (only if empty)
             logger.LogInformation("Seeding database if needed...");
-            await DbSeeder.SeedAsync(context);
+            await DbSeeder.SeedAsync(context, app.Environment.WebRootPath);
             logger.LogInformation("Database seeding completed.");
         }
         
