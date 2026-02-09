@@ -117,7 +117,7 @@ app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}");
 
-// Seed or recreate the database
+// Auto-migrate and seed database on startup
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
@@ -125,6 +125,8 @@ using (var scope = app.Services.CreateScope())
     
     try
     {
+        logger.LogInformation("Starting database initialization...");
+        
         var context = services.GetRequiredService<MusicStoreEntities>();
         var identityContext = services.GetRequiredService<ApplicationDbContext>();
         
@@ -133,21 +135,41 @@ using (var scope = app.Services.CreateScope())
         
         if (recreateDatabase)
         {
-            logger.LogWarning("Database recreation is ENABLED. This will delete all existing data!");
+            logger.LogWarning("?? Database recreation is ENABLED. This will delete all existing data!");
+            
+            // Recreate main database
             await DbSeeder.RecreateAndSeedAsync(context, logger);
             
-            // Ensure Identity database exists
-            await identityContext.Database.EnsureCreatedAsync();
+            // Recreate Identity database
+            logger.LogInformation("Recreating Identity database...");
+            await identityContext.Database.EnsureDeletedAsync();
+            await identityContext.Database.MigrateAsync();
+            logger.LogInformation("Identity database recreated.");
         }
         else
         {
+            // Normal migration and seeding
+            logger.LogInformation("Running EF Core migrations for MusicStoreEntities...");
+            await context.Database.MigrateAsync();
+            
+            logger.LogInformation("Running EF Core migrations for Identity database...");
+            await identityContext.Database.MigrateAsync();
+            
+            logger.LogInformation("Database migrations completed successfully.");
+            
             // Normal seeding (only if empty)
+            logger.LogInformation("Seeding database if needed...");
             await DbSeeder.SeedAsync(context);
+            logger.LogInformation("Database seeding completed.");
         }
+        
+        logger.LogInformation("? Database initialization complete!");
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "An error occurred while seeding the database.");
+        logger.LogError(ex, "An error occurred while initializing the database.");
+        // Don't throw - allow app to start even if migration fails
+        // This allows the app to serve requests and show meaningful errors
     }
 }
 
