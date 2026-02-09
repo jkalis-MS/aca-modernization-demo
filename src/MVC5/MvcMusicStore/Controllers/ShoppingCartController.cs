@@ -90,6 +90,7 @@ namespace MvcMusicStore.Controllers
         {
             var cart = ShoppingCart.GetCart(storeDB, this.HttpContext);
 
+            // Load full cart items with all related data for summary
             var cartItems = cart.GetCartItems()
                 .Select(a => a.Album.Title)
                 .OrderBy(x => x);
