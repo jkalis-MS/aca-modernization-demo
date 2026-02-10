@@ -8,7 +8,7 @@
     background: linear-gradient(135deg, #5bc0de 0%, #31b0d5 100%);
     color: #ffffff;
     padding: 10px 0;
-    margin-top: 50px;
+    margin-top: 0;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
@@ -103,4 +103,7 @@ ul#album-list li a:hover {
 
 .jumbotron {
     background-color: transparent;
+    padding-top: 5px;
+    padding-bottom: 0;
+    margin-bottom: 10px;
 }
