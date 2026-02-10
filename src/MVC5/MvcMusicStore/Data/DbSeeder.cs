@@ -42,10 +42,51 @@ public static class DbSeeder
         // Check if database already has data
         if (await context.Albums.AnyAsync())
         {
-            return; // Database has been seeded
+            // Database has been seeded, but ensure album art files exist
+            if (!string.IsNullOrEmpty(webRootPath))
+            {
+                await EnsureAlbumArtAsync(context, webRootPath);
+            }
+            return;
         }
 
         await SeedDataAsync(context, webRootPath);
+    }
+
+    /// <summary>
+    /// Ensures album art PNG files exist on disk and updates any stale/placeholder URLs.
+    /// </summary>
+    private static async Task EnsureAlbumArtAsync(MusicStoreEntities context, string webRootPath)
+    {
+        var albums = await context.Albums.Include(a => a.Genre).ToListAsync();
+        var genreCounter = new Dictionary<int, int>();
+        bool changed = false;
+
+        foreach (var album in albums)
+        {
+            if (!genreCounter.TryGetValue(album.GenreId, out var count))
+                count = 0;
+            genreCounter[album.GenreId] = count + 1;
+
+            var fileName = $"album-{album.AlbumId}.png";
+            var expectedUrl = $"/Images/AlbumArt/{fileName}";
+            var filePath = Path.Combine(webRootPath, "Images", "AlbumArt", fileName);
+
+            // Regenerate if the file doesn't exist on disk or the URL still points to a placeholder
+            if (!File.Exists(filePath) || album.AlbumArtUrl != expectedUrl)
+            {
+                var genreName = album.Genre?.Name ?? "Rock";
+                AlbumArtGenerator.GenerateAlbumArt(filePath, genreName, count);
+
+                album.AlbumArtUrl = expectedUrl;
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            await context.SaveChangesAsync();
+        }
     }
 
     private static async Task SeedDataAsync(MusicStoreEntities context, string webRootPath)
