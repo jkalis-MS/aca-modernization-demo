@@ -1,0 +1,60 @@
+﻿@{
+    ViewBag.Title = "Home Page";
+}
+
+<div class="jumbotron">
+    <div class="row text-center">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" role="img" aria-label="Music Store - Discover, Explore, Enjoy" style="max-width:75%;height:auto;">
+            <defs>
+                <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" style="stop-color:#2c3e50"/>
+                    <stop offset="100%" style="stop-color:#3498db"/>
+                </linearGradient>
+                <linearGradient id="accent" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" style="stop-color:#e74c3c"/>
+                    <stop offset="100%" style="stop-color:#c0392b"/>
+                </linearGradient>
+            </defs>
+            <rect width="960" height="300" fill="url(#bg)"/>
+            <g opacity="0.1" fill="none" stroke="#fff" stroke-width="2">
+                <path d="M0,150 Q120,80 240,150 T480,150 T720,150 T960,150"/>
+                <path d="M0,170 Q120,100 240,170 T480,170 T720,170 T960,170"/>
+                <path d="M0,130 Q120,60 240,130 T480,130 T720,130 T960,130"/>
+                <path d="M0,190 Q120,120 240,190 T480,190 T720,190 T960,190"/>
+                <path d="M0,110 Q120,40 240,110 T480,110 T720,110 T960,110"/>
+            </g>
+            <g opacity="0.08" fill="#fff">
+                <circle cx="120" cy="80" r="60"/>
+                <circle cx="120" cy="80" r="40" fill="url(#bg)"/>
+                <circle cx="120" cy="80" r="8"/>
+                <circle cx="840" cy="220" r="50"/>
+                <circle cx="840" cy="220" r="32" fill="url(#bg)"/>
+                <circle cx="840" cy="220" r="6"/>
+            </g>
+            <g opacity="0.12" fill="#fff">
+                <text x="60" y="240" font-size="40" font-family="serif">&#9834;</text>
+                <text x="180" y="60" font-size="30" font-family="serif">&#9835;</text>
+                <text x="750" y="80" font-size="35" font-family="serif">&#9834;</text>
+                <text x="880" y="120" font-size="28" font-family="serif">&#9835;</text>
+                <text x="30" y="140" font-size="24" font-family="serif">&#9833;</text>
+                <text x="920" y="260" font-size="32" font-family="serif">&#9833;</text>
+            </g>
+            <rect x="0" y="290" width="960" height="10" fill="url(#accent)"/>
+            <text x="480" y="120" text-anchor="middle" fill="#fff" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="48" font-weight="300" letter-spacing="2">MUSIC STORE</text>
+            <text x="480" y="165" text-anchor="middle" fill="#ecf0f1" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="300" letter-spacing="4" opacity="0.8">DISCOVER &#183; EXPLORE &#183; ENJOY</text>
+            <line x1="350" y1="185" x2="610" y2="185" stroke="#e74c3c" stroke-width="2" opacity="0.7"/>
+            <text x="480" y="220" text-anchor="middle" fill="#bdc3c7" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="300" letter-spacing="1" opacity="0.7">Your favorite albums, all in one place</text>
+        </svg>
+    </div>
+</div>
+<ul class="row list-unstyled" id="album-list">
+    @foreach (var album in Model)
+    {
+        <li class="col-lg-2 col-md-2 col-sm-2 col-xs-4 container">
+            <a href="@Url.Action("Details", "Store", new { id = album.AlbumId })">
+                <img alt="@album.Title" src="@Url.Content( @album.AlbumArtUrl)" />
+                <h4>@album.Title</h4>
+            </a>
+        </li>
+    }
+</ul>
