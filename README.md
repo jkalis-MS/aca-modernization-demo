@@ -6,7 +6,7 @@ In early 2025, we wanted to modernize Jon Galloway's [MVC Music Store](https://g
 
 This was before the GitHub Copilot "Agent" mode. I hit a wall immediately.
 
-![Screenshot](6.png)
+![Screenshot](screenshots/6.png)
 
 Entity Framework on .NET Framework doesn't support `Azure.Identity` or `DefaultAzureCredential`. You can't just add a NuGet package and call it done — you need EF Core, which means you need modern .NET. That means rewriting the data layer, the identity system, the startup pipeline, the views. The engineering team estimated **one week** of dedicated developer work. As a PM without deep .NET migration experience, I couldn't do it quickly myself. The project went on the backlog.
 
