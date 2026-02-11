@@ -2,9 +2,9 @@
 
 ---
 
-A year ago, I wanted to modernize Jon Galloway's [MVC Music Store](https://github.com/jongalloway/MvcMusicStore) — a classic ASP.NET MVC 5 app running on .NET Framework 4.8 with Entity Framework 4.1. The goal was straightforward: move to modern .NET, enable managed identity, and deploy to Azure Container Apps. No more plaintext connection strings. No more passwords in config files.
+In early 2025, I wanted to modernize Jon Galloway's [MVC Music Store](https://github.com/jongalloway/MvcMusicStore) — a classic ASP.NET MVC 5 app running on .NET Framework 4.8 with Entity Framework 4.1. The goal was straightforward: move to modern .NET, enable managed identity, and deploy to Azure Container Apps. No more plaintext connection strings. No more passwords in config files.
 
-I hit a wall immediately.
+This was before the GitHub Copilot "Agent" mode. I hit a wall immediately.
 
 Entity Framework on .NET Framework doesn't support `Azure.Identity` or `DefaultAzureCredential`. You can't just add a NuGet package and call it done — you need EF Core, which means you need modern .NET. That means rewriting the data layer, the identity system, the startup pipeline, the views. The engineering team estimated **one week** of dedicated developer work. As a PM without deep .NET migration experience, I couldn't do it quickly myself. The project went on the backlog.
 
@@ -109,7 +109,3 @@ If you have a .NET Framework app sitting on a backlog because "the migration is 
 MVC Music Store went from .NET Framework 4.0 with Entity Framework 4.1 and plaintext SQL credentials to .NET 10 on Azure Container Apps with managed identity, Key Vault, and zero secrets in code. In an afternoon.
 
 That backlog item might be a lunch break now.
-
----
-
-*The [MVC Music Store modernization repository](https://github.com/jkalis-MS/aca-modernization-demo) is public. The `appmod/dotnet-migration-plaintext-credentials-to-azure-key-vault-with-managed-identity` branch contains the fully modernized application with all infrastructure code.*
