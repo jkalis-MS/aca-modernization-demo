@@ -1,10 +1,8 @@
 ﻿# From "Maybe Next Quarter" to Done Before Lunch: Modernizing a Legacy .NET App with GitHub App Modernization
 
-**Published on [Apps on Azure Blog](https://techcommunity.microsoft.com/blog/appsonazureblog/)**
-
 ---
 
-A year ago, I wanted to modernize [MVC Music Store](https://github.com/jkalis-MS/aca-modernization-demo) — a classic ASP.NET MVC 3 app running on .NET Framework 4.0 with Entity Framework 4.1. The goal was straightforward: move to modern .NET, enable managed identity, and deploy to Azure Container Apps. No more plaintext connection strings. No more passwords in config files.
+A year ago, I wanted to modernize Jon Galloway's [MVC Music Store](https://github.com/jongalloway/MvcMusicStore) — a classic ASP.NET MVC 5 app running on .NET Framework 4.8 with Entity Framework 4.1. The goal was straightforward: move to modern .NET, enable managed identity, and deploy to Azure Container Apps. No more plaintext connection strings. No more passwords in config files.
 
 I hit a wall immediately.
 
