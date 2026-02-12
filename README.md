@@ -12,7 +12,7 @@ Entity Framework on .NET Framework doesn't support `Azure.Identity` or `DefaultA
 
 At that time, **GitHub App Modernization** existed but only offered **assessment** — it could tell you *what* needed to change, but couldn't make the changes for you.
 
-Fast-forward one year. The full modernization agent shipped. I sat down with the same app and the same goal. **A few hours later, it was running on Azure Container Apps with managed identity, Key Vault integration, and zero plaintext credentials.**
+Fast-forward one year. The full modernization agent shipped. I sat down with the same app and the same goal. **A few hours later, it was running on Azure Container Apps with managed identity, Key Vault integration, and zero plaintext credentials.** Thank you GitHub Copilot App Modernization https://aka.ms/ghco-appmod!
 
 Here's how it went.
 
