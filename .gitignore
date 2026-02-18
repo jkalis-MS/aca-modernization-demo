@@ -32,3 +32,4 @@ build/
 App_Data/
 Packages/
 .vs/
+.appmod/
