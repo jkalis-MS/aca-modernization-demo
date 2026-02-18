@@ -120,18 +120,14 @@ resource sqlServer 'Microsoft.Sql/servers@2022-05-01-preview' = {
     minimalTlsVersion: '1.2'
     version: '12.0'
     publicNetworkAccess: 'Enabled'
-  }
-}
-
-// SQL Server Azure AD Administrator
-resource sqlServerAadAdmin 'Microsoft.Sql/servers/administrators@2022-05-01-preview' = {
-  parent: sqlServer
-  name: 'ActiveDirectory'
-  properties: {
-    administratorType: 'ActiveDirectory'
-    login: 'MusicStore Admins'
-    sid: managedIdentity.properties.principalId
-    tenantId: subscription().tenantId
+    administrators: {
+      administratorType: 'ActiveDirectory'
+      principalType: 'Application'
+      login: 'MusicStore Admins'
+      sid: managedIdentity.properties.principalId
+      tenantId: subscription().tenantId
+      azureADOnlyAuthentication: true
+    }
   }
 }
 
@@ -231,11 +227,11 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         }
         {
           name: 'sql-connection-string-main'
-          value: 'Server=tcp:${sqlServer.properties.fullyQualifiedDomainName},1433;Initial Catalog=${sqlDatabaseName1};Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;'
+          value: 'Server=tcp:${sqlServer.properties.fullyQualifiedDomainName},1433;Initial Catalog=${sqlDatabaseName1};Authentication=Active Directory Default;User Id=${managedIdentity.properties.clientId};Encrypt=True;TrustServerCertificate=False;'
         }
         {
           name: 'sql-connection-string-identity'
-          value: 'Server=tcp:${sqlServer.properties.fullyQualifiedDomainName},1433;Initial Catalog=${sqlDatabaseName2};Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;'
+          value: 'Server=tcp:${sqlServer.properties.fullyQualifiedDomainName},1433;Initial Catalog=${sqlDatabaseName2};Authentication=Active Directory Default;User Id=${managedIdentity.properties.clientId};Encrypt=True;TrustServerCertificate=False;'
         }
       ]
     }
