@@ -168,7 +168,7 @@ namespace MvcMusicStore.Models
                 var orderDetail = new OrderDetail
                 {
                     AlbumId = item.AlbumId,
-                    OrderId = order.OrderId,
+                    Order = order,
                     UnitPrice = album.Price,
                     Quantity = item.Count,
                 };

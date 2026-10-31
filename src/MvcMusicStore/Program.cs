@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using MvcMusicStore.Models;
 using MvcMusicStore.Data;
 using MvcMusicStore.Services;
+using MvcMusicStore.Demo;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Azure.Monitor.OpenTelemetry.Profiler;
 using Azure.Identity;
@@ -45,17 +46,20 @@ if (!string.IsNullOrEmpty(connectionString))
 
 // Add services to the container.
 builder.Services.AddControllersWithViews();
+builder.Services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("databases");
 
 // Register Key Vault Service
 builder.Services.AddSingleton<IKeyVaultService, KeyVaultService>();
 
 // Configure Entity Framework Core with SQL Server
 builder.Services.AddDbContext<MusicStoreEntities>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("MusicStoreEntities")));
+    options.UseSqlServer(builder.Configuration.GetConnectionString("MusicStoreEntities"),
+        sql => sql.EnableRetryOnFailure()));
 
 // Configure ASP.NET Core Identity
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"),
+        sql => sql.EnableRetryOnFailure()));
 
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
 {
@@ -98,6 +102,9 @@ builder.Services.AddSession(options =>
 
 var app = builder.Build();
 
+// Keep synthetic 503 responses outside status-code re-execution.
+app.UseMiddleware<DemoOperations>();
+
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Home/Error"); // Global error handler
@@ -105,13 +112,17 @@ if (!app.Environment.IsDevelopment())
     app.UseHsts();
 }
 
-app.UseHttpsRedirection();
+app.UseWhen(context => !context.Request.Path.StartsWithSegments("/health"),
+    pipeline => pipeline.UseHttpsRedirection());
 app.UseStaticFiles();
 
 app.UseRouting();
 app.UseSession();
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.MapGet("/health/live", () => "Healthy").AllowAnonymous();
+app.MapHealthChecks("/health/ready").AllowAnonymous();
 
 app.MapControllerRoute(
     name: "default",
@@ -168,8 +179,7 @@ using (var scope = app.Services.CreateScope())
     catch (Exception ex)
     {
         logger.LogError(ex, "An error occurred while initializing the database.");
-        // Don't throw - allow app to start even if migration fails
-        // This allows the app to serve requests and show meaningful errors
+        throw;
     }
 }
 
