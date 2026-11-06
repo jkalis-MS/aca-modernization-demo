@@ -19,6 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$boundedRun = $DurationSeconds -gt 0 -or $MaxRequests -gt 0
 $required = @()
 if (!$PSBoundParameters.ContainsKey('ApplicationUrl')) { $required += 'resources.applicationUrl' }
 $releaseChecks = $Scenario -in 'Demo', 'Release'
@@ -146,7 +147,7 @@ namespace MusicStoreDemoTraffic
         private readonly Dictionary<string, int> failureCounts = new Dictionary<string, int>();
         private readonly Uri endpoint;
         private readonly string token, runId, scenario, operation, candidateVersion;
-        private readonly bool releaseChecks;
+        private readonly bool releaseChecks, boundedRun;
         private readonly int concurrency, duration, maxRequests, timeout;
         private readonly double rate;
         private readonly TextWriter writer;
@@ -167,6 +168,7 @@ namespace MusicStoreDemoTraffic
             this.timeout = timeout;
             this.rate = rate;
             this.writer = writer;
+            boundedRun = duration > 0 || maxRequests > 0;
             releaseChecks = scenario == "Demo" || scenario == "Release";
             operation = scenario == "Demo" ? "demo" : scenario == "Scale" ? "scale"
                 : scenario == "Release" ? "release-check" : "observe";
@@ -235,10 +237,13 @@ namespace MusicStoreDemoTraffic
                         int active;
                         if (Int32.TryParse(Header(response, "X-Demo-Active-Requests"), out active) && active >= 0)
                             result.ActiveRequests = active;
-                        if (result.StatusCode == 401 || result.StatusCode == 403 ||
-                            result.Version == null || result.Revision == null || result.Replica == null ||
-                            result.Process == null || result.RequestId == null || result.ActiveRequests == null)
+                        bool hasIdentity = result.Version != null && result.Revision != null && result.Replica != null &&
+                            result.Process != null && result.RequestId != null && result.ActiveRequests != null;
+                        if (result.StatusCode == 401 || result.StatusCode == 403)
                             result.Outcome = "SetupError";
+                        else if (!hasIdentity)
+                            result.Outcome = result.StatusCode == 408 || result.StatusCode == 429 ||
+                                (result.StatusCode >= 500 && result.StatusCode <= 599) ? "HttpError" : "SetupError";
                         else if (response.IsSuccessStatusCode)
                             result.Outcome = "Success";
                         else if (releaseChecks && result.StatusCode == 503 &&
@@ -333,7 +338,7 @@ namespace MusicStoreDemoTraffic
                 }
                 if (result.Outcome == "SetupError")
                     stopReason = "Setup failure: authentication rejected or required demo identity headers missing/invalid.";
-                else if (stopReason == null && completed >= 50 && (double)unexpectedErrors / completed > 0.02)
+                else if (boundedRun && stopReason == null && completed >= 50 && (double)unexpectedErrors / completed > 0.02)
                     stopReason = "Safety stop: unexpected HTTP/transport errors exceeded 2% after at least 50 completed requests.";
                 if (stopReason != null) stop.Cancel();
             }
@@ -455,7 +460,7 @@ function Show-TrafficStatus {
     $totalLabel = if ($releaseChecks) { 'TOTAL ' } else { '' }
     Write-Host (('  {0}SUCCESS {1:N0}   |   ERRORS {2:N0}' -f
         $totalLabel, $Snapshot.Success, $Snapshot.Errors) + $latencyLabel) -ForegroundColor $color
-    $showReleaseStatus = $Scenario -eq 'Release' -or ($Scenario -eq 'Demo' -and $Snapshot.ExpectedCandidate503 -gt 0)
+    $showReleaseStatus = $Scenario -eq 'Release' -or ($Scenario -eq 'Demo' -and $Snapshot.Errors -gt 0)
     if ($showReleaseStatus) {
         Write-Host ('  LAST 10s | SUCCESS {0:N0} | ERRORS {1:N0}' -f
             $Snapshot.RecentSuccess, $Snapshot.RecentErrors) -ForegroundColor $color
@@ -535,12 +540,12 @@ try {
     $summary = $task.GetAwaiter().GetResult()
     Show-TrafficStatus $summary -Finished
     if ($summary.StopReason) { throw $summary.StopReason }
-    if ($summary.UnexpectedErrors -gt 0) {
+    if ($boundedRun -and $summary.UnexpectedErrors -gt 0) {
         $failures = ($summary.FailureCounts.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Value)x $($_.Key)" }) -join '; '
         $details = if ($OutputPath) { "Request details: $fullOutputPath" } else { 'Use -OutputPath with a new JSONL filename on the next run to retain per-request evidence.' }
         throw "Traffic completed with $($summary.UnexpectedErrors) unexpected errors: $failures. $details"
     }
-    if ($summary.Success + $summary.ExpectedCandidate503 -eq 0) { throw 'No complete, authenticated demo response was received within the run bounds.' }
+    if ($boundedRun -and ($summary.Success + $summary.ExpectedCandidate503 -eq 0)) { throw 'No complete, authenticated demo response was received within the run bounds.' }
     if ($PassThru) { $summary }
 }
 finally {

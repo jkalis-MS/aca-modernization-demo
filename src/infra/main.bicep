@@ -245,11 +245,11 @@ resource app 'Microsoft.App/containerApps@2026-07-01' = if (deployApplication) {
             { name: 'ApplicationInsights__ConnectionString', secretRef: 'appinsights' }
             {
               name: 'ConnectionStrings__MusicStoreEntities'
-              value: 'Server=tcp:${sql.properties.fullyQualifiedDomainName},1433;Initial Catalog=${databaseNames[0]};Authentication=Active Directory Managed Identity;User Id=${identity.properties.clientId};Encrypt=True;TrustServerCertificate=False;'
+              value: 'Server=tcp:${sql.properties.fullyQualifiedDomainName},1433;Initial Catalog=${databaseNames[0]};Authentication=Active Directory Managed Identity;User Id=${identity.properties.clientId};Encrypt=True;TrustServerCertificate=False;Pooling=True;Load Balance Timeout=30;'
             }
             {
               name: 'ConnectionStrings__DefaultConnection'
-              value: 'Server=tcp:${sql.properties.fullyQualifiedDomainName},1433;Initial Catalog=${databaseNames[1]};Authentication=Active Directory Managed Identity;User Id=${identity.properties.clientId};Encrypt=True;TrustServerCertificate=False;'
+              value: 'Server=tcp:${sql.properties.fullyQualifiedDomainName},1433;Initial Catalog=${databaseNames[1]};Authentication=Active Directory Managed Identity;User Id=${identity.properties.clientId};Encrypt=True;TrustServerCertificate=False;Pooling=True;Load Balance Timeout=30;'
             }
           ], demoEnabled ? [
             { name: 'Demo__Enabled', value: 'true' }

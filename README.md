@@ -122,6 +122,12 @@ Deployment tradeoffs:
 - Key Vault uses read-only app RBAC, soft delete, and purge protection. SQL is
   Entra-only, ACR admin credentials are disabled, and managed identity is used for
   runtime access.
+- Both Bicep-provided SQL connection strings use
+  `Pooling=True;Load Balance Timeout=30;` for all scenarios, not only the incident.
+  Connections remain pooled, but connections older than 30 seconds are discarded
+  when returned to the pool. This does not interrupt active queries or change
+  EF retry, SQL command timeout, or probe settings. See
+  [SqlClient connection lifetime](https://learn.microsoft.com/dotnet/api/microsoft.data.sqlclient.sqlconnectionstringbuilder.loadbalancetimeout).
 - The existing dependency set still emits a moderate-severity advisory for
   `OpenTelemetry.Api` 1.12.0 (GHSA-g94r-2vxg-569j), and the login view emits an
   MVC1000 synchronous-partial warning. Deployment does not resolve those
@@ -143,8 +149,15 @@ references only in local configuration, not in this README.
 A suggested setup uses 0.5 vCPU / 1 GiB per replica, HTTP concurrency target 5,
 two to four healthy replicas, and one candidate replica with the same SQL
 databases. Warm replicas incur ongoing charges even without demo requests.
-Use native `az` commands for builds and staging; the demo scripts do not change
-resources.
+Use native `az` commands for builds and staging; the traffic generator and WATCH
+do not change resources. The optional SQL firewall fault script below deliberately
+changes the demo SQL server's Azure-services allowance.
+
+Use the same SQL connection settings on both healthy and candidate revisions:
+`Pooling=True;Load Balance Timeout=30;` on both database connection strings.
+These settings are unconditional in Bicep. Existing revisions need a configuration
+rollout; rebuilding an image or copying an old revision template alone does not
+apply the updated connection strings. No application-code change is required.
 
 Demo operations are disabled by default. Enabling them requires both
 `Demo__Enabled=true` and `Demo__IsolatedEnvironment=true`, plus a random
@@ -197,7 +210,7 @@ unless an explicit `-CandidateVersion` is
 supplied. Set it to the baked candidate version, not the revision name.
 Start default traffic once at healthy 100% and leave that exact same process
 running through scaling, candidate exposure, and rollback. No `-Scenario` argument
-or traffic restart is needed. After candidate errors first appear, `LAST 10s` shows
+or traffic restart is needed. After candidate or unexpected errors first appear, `LAST 10s` shows
 recent successes/errors, so errors visibly subside after rollback
 without restarting TRAFFIC. Totals and responding identities remain cumulative;
 past failures are never erased. No recent responses is not a successful rollback.
@@ -254,16 +267,26 @@ request cap. Default combined traffic and standalone Scale maintain 32 concurren
 requests; standalone Release uses 4
 slots/up to 10 requests per second; Recovery uses 8 slots/up to 20 requests per
 second. Scale throughput depends on response time, not a fixed requests/second
-target. Authentication/setup failures and the high-error-rate safety stop still
-stop traffic. Concurrency is capped at 64 and individual timeouts at 15 seconds.
+target. The default continuous run keeps going through timeouts, transport
+failures, and HTTP errors, even during a total outage, so it can show recovery
+without restarting. Ingress HTTP 408, 429, and 5xx responses without demo identity
+headers remain visible as HTTP errors, not authentication/setup failures or
+invented replica responses. Authentication rejection (401/403) and missing or
+invalid identity headers on other responses still stop traffic. Concurrency is
+capped at 64 and individual timeouts at 15 seconds.
 Optional `-DurationSeconds` (1–180) and `-MaxRequests` (1–15,000) bound automated
-runs; either can be supplied independently. Ctrl+C cancels and drains owned requests. Optional
+runs; either can be supplied independently. These bounded verification runs retain
+the 2% unexpected-error safety stop after at least 50 completed requests and fail
+on unexpected errors or no complete authenticated responses. Ctrl+C cancels and
+drains owned requests. Optional
 `-RunId <slug> -OutputPath <new-file.jsonl>` saves identity/status/latency results
 without credentials; existing files are not overwritten. Percentiles use the
 latest 2,048 completions. Cookies, redirects, configured retries, and proxy use
 are disabled; each HTTP/1.1 connection closes after one request, with a
-connection-attempt guard to prevent hidden request replay. Unexpected failures
-cause a nonzero exit; candidate 503s are separately counted, not hidden.
+connection-attempt guard to prevent hidden request replay. Continuous runs retain
+all failure counts without throwing solely because requests failed; bounded runs
+return a failure for unexpected errors. Candidate 503s are separately counted,
+not hidden.
 
 Use native Azure CLI for resource changes. For example, build new versions
 offstage, using new tags and baked version identifiers each time:
@@ -320,10 +343,76 @@ dotnet run --project .\tests\DemoOperations.Tests -c Release
 dotnet run --project .\tests\DemoOperations.Tests -c Release -p:DemoReleaseRegression=true
 .\scripts\Test-DemoUtilities.ps1
 .\scripts\Test-AzureLocalConfig.ps1
+.\scripts\Test-SqlFirewallRegression.ps1
 ```
 
 `Test-AzureLocalConfig.ps1` validates missing-configuration refusal without network
 access.
+
+### Scenario 3: mysterious regression and SRE Agent
+
+Follow Scenario 3 in [the presenter runbook](PRESENTER_RUNBOOK.md) to introduce
+the regression, investigate through Cascade's **Debug with SRE Agent**, and
+restore the recorded settings. Give the agent only the customer symptom; the
+technical cause below is presenter-only information.
+
+Use only in the isolated demo environment, with no other SQL consumers. After
+showing scale-in, start the same default TRAFFIC command again if it was stopped,
+then keep TRAFFIC and WATCH running through the outage and recovery. Browse the
+catalog normally as well. Both databases and all revisions using this SQL server
+can be affected.
+
+**Run in TERMINAL 1: CONTROL - PowerShell 7.4+, from the repository root.**
+
+```powershell
+.\scripts\Introduce-Misterious-Regression.ps1
+```
+
+Normal success output is a large cyan ASCII banner with a smiling intern and
+the message `Misterious regression introduced. Greetings from the Intern :)`.
+It fits an 80-column terminal and does not reveal the cause. Operator details,
+snapshot location, and recovery instructions are available with `-Verbose`
+offstage. Real errors still stop the script and remain visible.
+
+The script loads the subscription, resource group, and SQL server from the local
+Azure configuration. Before removing every server-level `0.0.0.0`–`0.0.0.0`
+[Azure-services rule](https://learn.microsoft.com/azure/azure-sql/database/firewall-configure?view=azuresql),
+it saves the firewall baseline to the ignored
+`config\sql-firewall-regression.local.json`. Public network access must already
+be enabled; other rules are not changed. An outstanding snapshot blocks another
+fault so that the original baseline is never overwritten. `-WhatIf` previews
+without writing the snapshot or changing Azure.
+
+The script does **not** restart a revision or prove that the catalog has broken.
+Allow several minutes for firewall propagation. With the shared 30-second
+connection lifetime applied, older connections are discarded when returned to
+the pool; existing connections and active queries are not forcibly interrupted.
+This rotation is not a guarantee of an outage within 30 seconds: firewall
+propagation and other server-level or database-level rules can still allow
+access. If a revision is restarted later to force fresh connections, SQL
+migration failure can prevent startup or cause restarts/unready replicas.
+Confirm the actual SQL firewall rejection in console logs before presenting the
+incident to the SRE Agent; do not assume every HTTP 503 is the firewall error.
+Do not redeploy Bicep during the incident: it recreates the Azure-services rule.
+
+**Run in TERMINAL 1: CONTROL - PowerShell to restore the saved allowance.**
+
+```powershell
+.\scripts\Introduce-Misterious-Regression.ps1 -Restore
+```
+
+Restoration recreates only the saved Azure-services rules under their original
+names. It refuses to overwrite a same-name rule whose addresses changed, and
+leaves other rules alone. A partial failure retains the snapshot for another
+restore attempt. After verification, the snapshot is removed so another
+rehearsal can capture a fresh baseline. Repeating `-Restore` without a snapshot
+checks the live configuration: if the Azure-services allowance is already
+enabled, it reports `Nothing to restore. Misterious regression is already reset.`
+without changing anything. If the allowance is disabled, it still refuses to
+guess the missing baseline; use the same checkout and `-ConfigPath` used to
+introduce the fault. Allow propagation and verify readiness and catalog recovery
+separately. With a custom `-ConfigPath`, the snapshot is
+saved beside that configuration; keep that directory private and untracked.
 
 ---
 

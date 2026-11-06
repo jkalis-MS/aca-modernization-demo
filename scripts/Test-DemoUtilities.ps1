@@ -108,12 +108,14 @@ namespace DemoUtilitiesTests
                         if (SetupFailureAfter > 0 && Requests.Count >= SetupFailureAfter) mode = "missing";
                         await Task.Delay(DelayMs, stop.Token).ConfigureAwait(false);
                         if (mode == "disconnect") return;
-                        int status = mode == "candidate" || mode == "stable503" ||
+                        int status = mode == "candidate" || mode == "stable503" || mode == "gateway503" ||
                             ((mode == "mixed" || mode == "split") && Requests.Count % 2 == 0) ? 503
-                            : mode == "unauthorized" ? 401 : mode == "redirect" ? 302 : 200;
+                            : mode == "gateway500" ? 500 : mode == "gateway429" ? 429
+                            : mode == "gateway408" ? 408 : mode == "unauthorized" ? 401
+                            : mode == "forbidden" ? 403 : mode == "redirect" ? 302 : 200;
                         var response = new StringBuilder("HTTP/1.1 " + status + " Test\r\nConnection: close\r\nContent-Length: 2\r\n");
                         if (mode == "redirect") response.Append("Location: http://127.0.0.1:" + Port + "/must-not-follow\r\n");
-                        if (mode != "missing")
+                        if (mode != "missing" && !mode.StartsWith("gateway", StringComparison.Ordinal))
                         {
                             response.Append("X-Demo-Version: " + (mode == "candidate" ||
                                 (mode == "split" && status == 503) ? "candidate" : "stable") + "\r\n");
@@ -318,11 +320,22 @@ try {
         & $trafficScript -ApplicationUrl $url -Scenario Release -CandidateVersion candidate -DurationSeconds 5 -MaxRequests 2
     } 'unexpected errors: 2x HttpError \| HTTP 503'
 
-    foreach ($mode in 'missing', 'unauthorized') {
+    $server.Mode = 'gateway503'
+    $gatewayScreen = [Collections.Generic.List[string]]::new()
+    $gatewayPath = Join-Path $work 'gateway.jsonl'
+    Assert-Fails {
+        & $trafficScript -ApplicationUrl $url -CandidateVersion candidate -Concurrency 1 -MaxRequests 2 -OutputPath $gatewayPath -NoClear 6>&1 |
+            ForEach-Object { $gatewayScreen.Add([string]$_) }
+    } 'unexpected errors: 2x HttpError \| HTTP 503'
+    $gatewayRecords = @(Get-Content $gatewayPath | ConvertFrom-Json)
+    Assert-True (@($gatewayRecords | Where-Object { $_.Outcome -ne 'HttpError' -or $_.Replica }).Count -eq 0) 'Unidentified ingress 503s are HTTP errors, not setup failures or invented replica responses.'
+    Assert-True (($gatewayScreen -join "`n") -match 'LAST 10s \| SUCCESS 0 \| ERRORS 2') 'The recent-response window appears for outages without requiring previous candidate exposure.'
+
+    foreach ($mode in 'missing', 'unauthorized', 'forbidden') {
         $server.Mode = $mode
         $before = $server.Requests.Count
         Assert-Fails {
-            & $trafficScript -ApplicationUrl $url -Scenario Recovery -Concurrency 1 -DurationSeconds 5 -MaxRequests 20
+            & $trafficScript -ApplicationUrl $url -Scenario Recovery -Concurrency 1
         } 'Setup failure'
         Assert-True (($server.Requests.Count - $before) -eq 1) 'Setup failure stops immediately.'
     }
@@ -394,6 +407,74 @@ try {
         $continuousEngine.Cancel()
         $null = $continuousTask.GetAwaiter().GetResult()
         $continuousEngine.Dispose()
+    }
+
+    $server.Mode = 'gateway503'
+    $outageOutput = @(& {
+        $cancelDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        function Start-Sleep {
+            param([int]$Milliseconds)
+            if ([DateTime]::UtcNow -gt $cancelDeadline) { throw 'Continuous outage script did not reach the cancellation threshold.' }
+            if ($engine.GetSnapshot().UnexpectedErrors -ge 64) { $engine.Cancel() }
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $Milliseconds
+        }
+        & $trafficScript -ApplicationUrl $url -CandidateVersion candidate -Concurrency 4 -PassThru -NoClear 6>&1
+    })
+    $outageSummary = $outageOutput | Where-Object { $_.GetType().Name -eq 'Snapshot' }
+    Assert-True ($outageSummary.Success -eq 0 -and $outageSummary.UnexpectedErrors -ge 64 -and
+        $outageSummary.InFlight -eq 0 -and !$outageSummary.StopReason) 'Cancelling the actual default script during a total outage returns its failure evidence without throwing.'
+    Assert-True (($outageOutput -join "`n") -match 'LIVE TRAFFIC \| FINISHED') 'The default script finishes normally after cancellation even when no authenticated request succeeded.'
+
+    foreach ($mode in 'stable503', 'gateway503', 'gateway500', 'gateway429', 'gateway408', 'disconnect', 'timeout') {
+        $server.Mode = if ($mode -eq 'timeout') { 'success' } else { $mode }
+        $server.DelayMs = if ($mode -eq 'timeout') { 1400 } else { 0 }
+        $outageEngine = $engineType::new(
+            $url, $env:MUSICSTORE_DEMO_TOKEN, "outage-$mode", 'Demo', 'candidate',
+            32, 0, 0, 1, 100, $null)
+        try {
+            $outageTask = $outageEngine.RunAsync()
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                Start-Sleep -Milliseconds 50
+                $outage = $outageEngine.GetSnapshot()
+            } while ($outage.UnexpectedErrors -lt 64 -and !$outageTask.IsCompleted -and [DateTime]::UtcNow -lt $deadline)
+            Assert-True ($outage.UnexpectedErrors -ge 64 -and $outage.Success -eq 0 -and
+                !$outageTask.IsCompleted -and !$outage.StopReason) "Continuous traffic survives 100% $mode failures beyond the old safety threshold."
+            Assert-True ($outage.ExpectedCandidate503 -eq 0 -and $outage.RecentErrors -gt 0) "$mode failures remain real errors, not expected candidate responses."
+            if ($mode.StartsWith('gateway') -or $mode -in 'disconnect', 'timeout') {
+                Assert-True ($outage.Identities.Count -eq 0) "$mode failures do not invent a responding replica."
+            }
+            if ($mode -eq 'timeout') {
+                Assert-True ($outage.Timeouts -ge 64 -and $outage.Cancellations -eq 0) 'Timeouts remain distinct from manual cancellation during a total outage.'
+            }
+            $server.Mode = 'success'
+            $server.DelayMs = 0
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            do {
+                Start-Sleep -Milliseconds 50
+                $recovered = $outageEngine.GetSnapshot()
+            } while ($recovered.Success -eq 0 -and !$outageTask.IsCompleted -and [DateTime]::UtcNow -lt $deadline)
+            Assert-True ($recovered.Success -gt 0 -and $recovered.UnexpectedErrors -ge $outage.UnexpectedErrors -and
+                !$outageTask.IsCompleted -and !$recovered.StopReason) "The same $mode traffic process observes recovery without erasing failures."
+            if ($mode -eq 'gateway503') {
+                $deadline = [DateTime]::UtcNow.AddSeconds(15)
+                do {
+                    Start-Sleep -Milliseconds 100
+                    $recovered = $outageEngine.GetSnapshot()
+                } while (($recovered.RecentErrors -gt 0 -or $recovered.RecentSuccess -eq 0) -and [DateTime]::UtcNow -lt $deadline)
+                Assert-True ($recovered.RecentErrors -eq 0 -and $recovered.RecentSuccess -gt 0 -and
+                    $recovered.UnexpectedErrors -ge 64 -and !$outageTask.IsCompleted) 'Recovery clears the recent outage window while retaining cumulative failures.'
+            }
+            $outageEngine.Cancel()
+            Assert-True ($outageTask.Wait(5000)) "Manual cancellation drains $mode traffic promptly."
+            $outageSummary = $outageTask.GetAwaiter().GetResult()
+            Assert-True ($outageSummary.InFlight -eq 0 -and !$outageSummary.StopReason) "$mode traffic ends cleanly only when cancelled, with its error evidence intact."
+        }
+        finally {
+            $outageEngine.Cancel()
+            $null = $outageTask.GetAwaiter().GetResult()
+            $outageEngine.Dispose()
+        }
     }
     $server.Dispose()
     $server = $null

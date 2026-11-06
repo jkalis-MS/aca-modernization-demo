@@ -1,11 +1,12 @@
 # Music Store: ACA operations presenter runbook
 
 Use the existing web application to show HTTP scaling, traffic rollback, and
-recovery after one application process crashes. Allow about 16 minutes.
+diagnosis of a mysterious regression with **Debug with SRE Agent** in Cascade.
+Allow about 20–25 minutes, with extra time for incident propagation if needed.
 
 **Rehearsal requirement:** verify scale-out, candidate exposure, and rollback in
-one uninterrupted traffic run in your own environment. The console-based crash
-procedure must also pass rehearsal before it is used live.
+one uninterrupted traffic run in your own environment. Also rehearse regression
+introduction, the Cascade SRE Agent workflow, and recovery before presenting.
 
 **Deployment prerequisite for the unified traffic command:** rebuild and stage
 both healthy and candidate images from code supporting the combined `demo`
@@ -22,7 +23,7 @@ visible in terminal tabs or window titles:
 
 | Terminal | Name | Colors | Purpose |
 |---|---|---|---|
-| 1 | CONTROL | White on dark charcoal (`#202020`) | Azure inspection, traffic changes, and one targeted console session |
+| 1 | CONTROL | White on dark charcoal (`#202020`) | Azure inspection, traffic changes, and regression control |
 | 2 | TRAFFIC | White on near-black navy (`#0B1220`) | Synthetic HTTP requests; holds the demo token in memory |
 | 3 | WATCH | **Bright white on black** | **Primary audience view:** read-only replica status |
 
@@ -49,7 +50,8 @@ Terminal labels are outside the command blocks.
 
 Initialization enables native-command error handling for the current session.
 Failed Azure CLI commands report errors and stop execution without inline
-exit-code checks. Crash-target safety checks remain in Scenario 3.
+exit-code checks. The regression script saves a private recovery baseline before
+changing the environment.
 
 Before presenting, copy this template to `config\PRESENTER_RUNBOOK.local.md` and
 replace all three `<repository-root>` placeholders in that ignored local copy
@@ -64,8 +66,10 @@ cart/login continuity.
 Before the talk, build and stage both images and configure the local file.
 Do not build, provision infrastructure, grant permissions, or run the deployment
 script onstage. The ignored `config\azure.local.json` must contain the application
-URL, subscription, resource group, app name, healthy/candidate revisions, baked
-candidate version, and versioned Key Vault token reference. Never show the token.
+URL, subscription, resource group, app name, SQL server name, healthy/candidate
+revisions, baked candidate version, and versioned Key Vault token reference.
+Never show the token. Complete Scenario 3's presenter-only preflight below
+before screen sharing.
 
 ### Terminal 1 — CONTROL: initialize
 
@@ -76,7 +80,7 @@ $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $tru
 Set-Location -LiteralPath '<repository-root>'
 $Host.UI.RawUI.WindowTitle = '1 - CONTROL'; $Host.UI.RawUI.BackgroundColor = 'Black'; $Host.UI.RawUI.ForegroundColor = 'White'; Write-Host "`e]11;#202020`a`e[48;2;32;32;32m`e[2J`e[H" -NoNewline
 function global:prompt { 'CONTROL> ' }
-$Config = .\scripts\Get-AzureLocalConfig.ps1 -RequiredSettings deployment.tenantId,deployment.resourceGroupName,resources.containerAppName,resources.applicationUrl,demo.healthyRevision,demo.candidateRevision
+$Config = .\scripts\Get-AzureLocalConfig.ps1 -RequiredSettings deployment.tenantId,deployment.resourceGroupName,resources.containerAppName,resources.applicationUrl,resources.sqlServerName,demo.healthyRevision,demo.candidateRevision
 $Healthy = $Config.demo.healthyRevision
 $Candidate = $Config.demo.candidateRevision
 $Azure = @('--subscription', $Config.deployment.subscriptionId, '--resource-group', $Config.deployment.resourceGroupName, '--name', $Config.resources.containerAppName)
@@ -184,11 +188,13 @@ visible without CPU stress. It is not a production performance benchmark.
 The generator keeps 32 requests in flight until you press **Ctrl+C in TERMINAL 2:
 TRAFFIC**. There is no duration or total-request limit. Leave this exact process
 running into Scenario 2; no scenario argument, switch, or restart is needed.
-Authentication/setup failures and the high-error-rate safety stop still stop
-traffic.
+The continuous run stays up through timeouts, HTTP errors, and a complete outage
+so it can show recovery without restarting. Authentication/setup failures still
+stop traffic. Optional duration/request-bounded verification runs retain their
+high-error-rate safety stop and strict failure result.
 
 Cancellation of in-flight requests when you stop traffic is expected and is not
-counted as an error. Any unexpected failure still fails the run; read the
+counted as an error. Unexpected failures remain visible; read the
 `FAILURE` outcome/status on TRAFFIC. Use `-OutputPath` with a new filename when
 starting traffic offstage if per-request evidence is needed.
 Do not describe a run with unexpected failures as error-free.
@@ -273,107 +279,178 @@ scale-in toward two replicas, plus the candidate's one warm replica. It can take
 several minutes. If scale-in is delayed, describe the delay
 and use the rehearsal recording.
 
-## Scenario 3 — Crash one application process (about 5 minutes)
+## Scenario 3 — Misterious regression and Debug with SRE Agent (about 8–10 minutes)
 
-**Warning:** deliberately disruptive. Rehearse exact console behavior first.
-No live builds, revision restart, redeployment, traffic changes, or public crash
-endpoint are part of this fault.
+**Say:** "The catalog is working. An intern is about to introduce a mysterious
+regression. Instead of guessing, let's investigate with SRE Agent."
 
-Require healthy 100% traffic, candidate 0%, and at least two ready replicas of
-the healthy revision. Recheck traffic before continuing.
+This is a deliberately disruptive availability incident, not a process-crash
+demonstration. Keep the cause hidden until the agent has investigated. Do not
+project the script source, recovery snapshot, presenter-only notes, or `-Verbose`
+output. No build, redeployment, revision restart, or canary exposure is needed.
+
+### Establish the working baseline
+
+Require healthy 100% traffic, candidate 0%, working catalog browsing, and healthy
+database readiness. Resolve any leftover incident offstage before starting.
 
 **Run in TERMINAL 1: CONTROL - PowerShell.**
 
 ```powershell
 az containerapp show @Azure --query properties.configuration.ingress.traffic -o table
+(Invoke-WebRequest "$($Config.resources.applicationUrl.TrimEnd('/'))/health/ready" -TimeoutSec 30).StatusCode
+(Invoke-WebRequest "$($Config.resources.applicationUrl.TrimEnd('/'))/Store/Browse?genre=Rock" -TimeoutSec 30).StatusCode
 ```
 
-**Run in TERMINAL 2: TRAFFIC - PowerShell.**
+Both HTTP checks must return 200. Browse the catalog in the browser as well.
+
+If TRAFFIC was stopped to show scale-in after Scenario 2, start the same default
+command again. If it is already running, leave it alone; do not start a second
+generator. Keep this process and WATCH running through the incident and recovery.
+No scenario argument or incident-specific switch is required.
+
+**Run in TERMINAL 2: TRAFFIC - PowerShell, only if not already running.**
 
 ```powershell
-.\scripts\Invoke-DemoTraffic.ps1 -Scenario Recovery
+.\scripts\Invoke-DemoTraffic.ps1
 ```
 
-Select one exact ready container. Record its ID/restart count before opening
-the console. Do not let the CLI select the latest revision or a random replica.
+### Introduce the regression
 
 **Run in TERMINAL 1: CONTROL - PowerShell.**
 
 ```powershell
-$Replicas = @(az containerapp replica list @Azure --revision $Healthy -o json | ConvertFrom-Json)
-$Ready = @($Replicas | Where-Object { $_.properties.containers | Where-Object { $_.name -eq 'web' -and $_.ready } })
-if ($Ready.Count -lt 2) { throw 'Need at least two ready replicas. Do not crash.' }
-$Victim = $Ready[0].name
-Write-Host "Selected replica: $Victim"
-$Ready[0].properties.containers | Select-Object name, containerId, restartCount
-az containerapp exec @Azure --revision $Healthy --replica $Victim --container web --command /bin/bash
+.\scripts\Introduce-Misterious-Regression.ps1
 ```
 
-**TERMINAL 1 is now a Linux container shell, not PowerShell.**
-Verify PID 1 and capture its process start token. The check refuses unexpected
-processes and signal configurations.
+The large ASCII banner says **"Misterious regression introduced. Greetings from
+the Intern :)"** without revealing the cause. Run the command once, without
+`-Restore` or `-Verbose`. Allow time for the failure to appear; do not repeat the
+fault or restart the revision to speed it up.
 
-**Run in TERMINAL 1: CONTROL - Bash INSIDE the selected container.**
+**Point to TRAFFIC:** successes give way to HTTP errors or timeouts. The continuous
+run stays up even if every request fails. **LAST 10s** shows recent outcomes;
+cumulative failures are retained. Missing response identities do not mean there
+are zero containers.
 
-```bash
-# TERMINAL 1: CONTROL | INSIDE THE SELECTED CONTAINER | Bash, not PowerShell
-cmd=$(tr '\000' ' ' < /proc/1/cmdline)
-if [ "$cmd" != 'dotnet MvcMusicStore.dll ' ]; then
-    echo "Unexpected PID 1; refusing."
-    exit 1
-fi
-mask=$(awk '/^SigCgt:/ {print $2}' /proc/1/status)
-if [ -z "$mask" ] || (( (16#$mask & 32) == 0 )); then
-    echo "No SIGABRT handler; refusing."
-    exit 1
-fi
-start=$(awk '{print $22}' /proc/1/stat)
-printf 'Target: %s\nProcess start token: %s\n' "$cmd" "$start"
+**Point to WATCH:** readiness, activation, and restart behavior may change.
+A revision's **Healthy** label alone does not prove the catalog is available.
+Describe the actual state rather than claiming the containers are running
+normally. Show an ordinary catalog request failing or timing out in the browser.
+
+### Diagnose in Cascade
+
+Open the demonstrated Container App in the **Cascade portal** and select
+**Debug with SRE Agent**. Confirm that the investigation targets the correct app.
+Present only the customer symptom, not the injected change or a suggested cause.
+
+**Enter in CASCADE: SRE Agent conversation - not a terminal.**
+
+```text
+The catalog was working, but now requests fail or time out. Investigate this Container App, identify the root cause, and show the supporting evidence. Diagnose only; do not make changes yet.
 ```
 
-Confirm you are in the selected container. Send the fault **once**:
+Let the agent investigate. Ask it to connect the customer impact to concrete
+logs and configuration evidence, distinguish symptoms from the root cause, and
+propose the smallest corrective change. Do not feed it the script contents or
+the known error number. If it cannot establish a supported diagnosis, say so;
+do not present an unsupported guess as a successful investigation.
 
-**Run in TERMINAL 1: CONTROL - Bash INSIDE the selected container.**
+If diagnosis stalls beyond the rehearsed budget, restore the captured settings
+using the command below and switch to a labeled recording. Do not leave the
+incident active while waiting indefinitely for the agent.
 
-```bash
-# TERMINAL 1: CONTROL | INSIDE THE SELECTED CONTAINER | Bash | ONE SHOT
-if [ -z "$start" ] || [ "$start" != "$(awk '{print $22}' /proc/1/stat)" ]; then
-    echo "Process identity changed; refusing."
-    exit 1
-fi
-kill -ABRT 1
-```
+**Say, after the evidence is established:** "Now we understand the cause.
+Let's restore the known-good configuration and confirm customer recovery."
 
-The console should disconnect. **Never retry after a disconnect or ambiguous
-result.** Observe evidence instead. SIGABRT is an ungraceful fault; PID 1 has
-special Linux signal rules, so an in-container `kill -9 1` is not substituted.
-If the command fails or the process remains alive, stop the fault demonstration.
-
-**Point to TRAFFIC:** the survivor continues responding; failures/timeouts remain
-visible. A new process identity should eventually serve requests.
-
-**Point to WATCH:** restart count or container replacement evidence, readiness,
-and return to service. The replica name may remain unchanged. The traffic
-identity table is cumulative, so old processes remain listed.
-
-**Explain:** runtime process-exit detection causes recovery. Readiness controls
-return to traffic; this is not a liveness-triggered hung-process demonstration.
-In-flight requests may fail. This does not prove zero downtime or zone/region
-resilience. No application retries are configured by the generator.
-
-After the console closes, CONTROL is back in PowerShell:
+### Restore and show recovery
 
 **Run in TERMINAL 1: CONTROL - PowerShell.**
 
 ```powershell
-az containerapp replica list @Azure --revision $Healthy --query '[].{replica:name,containers:properties.containers[].{name:name,ready:ready,restarts:restartCount,containerId:containerId}}' -o json
+.\scripts\Introduce-Misterious-Regression.ps1 -Restore
 ```
 
-Require at least two ready replicas and successful responses from a new process.
-Use a 180-second rehearsal recovery budget; if recovery is not established, stop
-the demo and show a labeled recording. Do not crash another container.
+This restores the captured settings, not a guessed fix. If the agent has already
+restored the original settings with your explicit approval, use the same command
+to reconcile the saved recovery state. Without a saved incident, an already-reset
+environment produces a neutral no-op message; an unsafe missing-baseline case
+still stops with an error.
+
+Leave the same TRAFFIC process and WATCH running. Allow propagation and
+in-flight failures to settle. Require **LAST 10s** to show successful responses
+and zero errors, not an empty window. Historical totals and red rows can remain;
+they are evidence of the incident, not proof it is still ongoing.
+
+Once responses resume, confirm ordinary catalog browsing and database readiness.
+
+**Run in TERMINAL 1: CONTROL - PowerShell.**
+
+```powershell
+(Invoke-WebRequest "$($Config.resources.applicationUrl.TrimEnd('/'))/health/ready" -TimeoutSec 30).StatusCode
+(Invoke-WebRequest "$($Config.resources.applicationUrl.TrimEnd('/'))/Store/Browse?genre=Rock" -TimeoutSec 30).StatusCode
+az containerapp revision list @Azure --query '[].{revision:name,health:properties.healthState,traffic:properties.trafficWeight,replicas:properties.replicas}' -o table
+```
+
+Both HTTP checks must return 200. Require ready healthy-revision replicas in
+WATCH, healthy 100% traffic, and candidate 0%. Recovery is not established by a
+status label alone.
+
+**Explain:** SRE Agent helped diagnose an external dependency failure using
+evidence. Adding replicas or rolling traffic back cannot repair shared dependency
+access. Remediation was reviewed and controlled, then verified with customer
+requests; this is not automatic self-healing.
+
+If recovery exceeds the rehearsed budget, stop synthetic traffic, use a clearly
+labeled recording, and continue recovery offstage. Do not introduce the fault
+again or weaken health checks to manufacture a successful result.
+
+### Presenter-only preflight and technical notes — do not project
+
+Before the talk, verify the app uses the public Azure SQL endpoint, public
+network access is enabled, and no other server-level or database-level rule
+allows the app's outbound addresses. Both databases and all revisions share
+this SQL server; ensure there are no other consumers.
+
+The regression script saves the baseline in the ignored
+`config\sql-firewall-regression.local.json`, then removes only the
+`0.0.0.0`–`0.0.0.0` Azure-services firewall allowance. Use the same checkout and
+configuration for introduction and restoration. Do not delete the snapshot,
+change other firewall rules, disable public network access, or deploy Bicep
+during the incident; Bicep would recreate the allowance.
+
+Both revisions must already use `Pooling=True;Load Balance Timeout=30;` for both
+databases, consistently across every scenario. Connections older than 30 seconds
+are retired when returned to the pool, not interrupted mid-query. SQL firewall
+propagation can still take several minutes; this is not a 30-second outage
+guarantee.
+
+Privately establish a genuine SQL firewall rejection in console logs, commonly
+error **40615**, before attributing the incident to that cause. Application
+readiness depends on both databases, and SQL initialization happens before the
+web server starts. Replicas may become unready, activating, or restarting;
+ingress may time out or return 503 without demo identity headers. These are not
+the candidate's intentional, identified 503 responses.
+
+Verify the Cascade entry point, agent permissions, log access, recovery command,
+and measured propagation/recovery timing offstage. Console/system logs are
+important if the application cannot complete startup. The initial agent request
+is diagnosis-only; approve any proposed remediation explicitly.
 
 ## Finish and repeat
+
+Restore the incident settings before ending the demo, including after an aborted
+Scenario 3. The restore command is safe to repeat when already reset.
+
+**Run in TERMINAL 1: CONTROL - PowerShell.**
+
+```powershell
+.\scripts\Introduce-Misterious-Regression.ps1 -Restore
+```
+
+Before stopping either terminal, confirm catalog/readiness HTTP 200 and recent
+successful traffic with zero recent errors, as in Scenario 3. Restoring settings
+alone does not establish application recovery.
 
 Stop requests with **Ctrl+C in TERMINAL 2: TRAFFIC** if still running.
 Stop observation with **Ctrl+C in TERMINAL 3: WATCH**.
@@ -392,9 +469,11 @@ az containerapp revision list @Azure --query '[].{revision:name,health:propertie
 ```
 
 Before repeating, require healthy 100%, candidate 0%, stable healthy containers,
-no remaining generators, and eventual return to the two-replica baseline. Reload
-the token in TRAFFIC. Do not restart a revision to reset the recovery demo.
+restored incident settings, successful catalog/readiness checks, no remaining
+generators, and eventual return to the two-replica baseline. Reload the token in
+TRAFFIC. Do not restart a revision merely to reset the incident.
 
 Warm replicas still cost money. Ending the prepared demo environment is a
 separate, deliberate deployment/reset operation, not part of this live runbook.
-Keep recordings of scaling, rollback, and recovery available before presenting.
+Keep recordings of scaling, rollback, and SRE diagnosis/recovery available before
+presenting.
