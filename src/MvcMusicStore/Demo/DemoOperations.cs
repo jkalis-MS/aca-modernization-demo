@@ -92,7 +92,7 @@ namespace MvcMusicStore.Demo
             if (!HttpMethods.IsGet(context.Request.Method) ||
                 !context.Request.Path.Equals(new PathString("/Store/Browse")) ||
                 context.Request.Query["genre"].Count != 1 || context.Request.Query["genre"] != "Rock" ||
-                operations.Count != 1 || (operation != "scale" && operation != "release-check" && operation != "observe") ||
+                operations.Count != 1 || (operation != "demo" && operation != "scale" && operation != "release-check" && operation != "observe") ||
                 runIds.Count != 1 || !RunIdPattern.IsMatch(runId))
             {
                 await RejectAsync(context, StatusCodes.Status400BadRequest, "Invalid synthetic catalog request.");
@@ -126,11 +126,11 @@ namespace MvcMusicStore.Demo
             try
             {
                 // This delay ends before MVC opens a database connection.
-                if (operation == "scale")
+                if (operation == "scale" || operation == "demo")
                 {
                     await Task.Delay(500, context.RequestAborted);
                 }
-                if (operation == "release-check" && regression)
+                if ((operation == "release-check" || operation == "demo") && regression)
                 {
                     context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                     await context.Response.WriteAsJsonAsync(new

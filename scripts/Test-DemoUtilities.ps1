@@ -56,6 +56,7 @@ namespace DemoUtilitiesTests
         public readonly ConcurrentQueue<Request> Requests = new ConcurrentQueue<Request>();
         public string Mode { get; set; } = "success";
         public int DelayMs { get; set; } = 100;
+        public int SetupFailureAfter { get; set; }
         public int Port { get; private set; }
         public int MaxActive { get { return maxActive; } }
 
@@ -104,15 +105,18 @@ namespace DemoUtilitiesTests
                         }
                         Requests.Enqueue(new Request { Line = line, Headers = headers, Timestamp = DateTime.UtcNow });
                         string mode = Mode;
+                        if (SetupFailureAfter > 0 && Requests.Count >= SetupFailureAfter) mode = "missing";
                         await Task.Delay(DelayMs, stop.Token).ConfigureAwait(false);
                         if (mode == "disconnect") return;
-                        int status = mode == "candidate" || mode == "stable503" ? 503
+                        int status = mode == "candidate" || mode == "stable503" ||
+                            ((mode == "mixed" || mode == "split") && Requests.Count % 2 == 0) ? 503
                             : mode == "unauthorized" ? 401 : mode == "redirect" ? 302 : 200;
                         var response = new StringBuilder("HTTP/1.1 " + status + " Test\r\nConnection: close\r\nContent-Length: 2\r\n");
                         if (mode == "redirect") response.Append("Location: http://127.0.0.1:" + Port + "/must-not-follow\r\n");
                         if (mode != "missing")
                         {
-                            response.Append("X-Demo-Version: " + (mode == "candidate" ? "candidate" : "stable") + "\r\n");
+                            response.Append("X-Demo-Version: " + (mode == "candidate" ||
+                                (mode == "split" && status == 503) ? "candidate" : "stable") + "\r\n");
                             response.Append("X-Demo-Revision: revision-test\r\nX-Demo-Replica: replica-test\r\n");
                             response.Append("X-Demo-Process: process-test\r\nX-Demo-Request-Id: " + Guid.NewGuid().ToString("N") + "\r\n");
                             response.Append("X-Demo-Active-Requests: " + current + "\r\n");
@@ -155,14 +159,23 @@ try {
         demo = @{candidateVersion='candidate'}
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $trafficConfigPath
     $results = Join-Path $work 'scale.jsonl'
+    if (!('MusicStoreDemoTraffic.Engine' -as [type])) {
+        Add-Type -TypeDefinition 'namespace MusicStoreDemoTraffic { public sealed class Engine {} public sealed class Snapshot {} }'
+    }
     $displayOutput = @(& $trafficScript -ApplicationUrl $url -Scenario Scale -RunId local-test `
         -Concurrency 4 -DurationSeconds 10 -MaxRequests 12 -OutputPath $results -PassThru -NoClear 6>&1)
-    $summary = $displayOutput | Where-Object { $_ -is [MusicStoreDemoTraffic.Snapshot] }
+    $summary = $displayOutput | Where-Object { $_.GetType().Name -eq 'Snapshot' }
+    Assert-True ($summary.GetType().Namespace -like 'MusicStoreDemoTraffic_*') 'Traffic isolates the current engine from stale types already loaded in the terminal.'
+    $engineType = $summary.GetType().Assembly.GetType("$($summary.GetType().Namespace).Engine")
     $screen = ($displayOutput | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
     Assert-True ($screen -match 'MUSIC STORE \| SCALE \| FINISHED') 'Traffic has a compact final screen.'
     Assert-True ($screen -match 'RESPONDING REPLICAS 1' -and $screen -match 'SUCCESS 12') 'Traffic displays response identity counts and successes.'
+    Assert-True ($screen -notmatch 'LATENCY|p50|p95') 'Default scaling display omits latency.'
+    Assert-True ($summary.P50Ms -gt 0 -and $summary.P95Ms -ge $summary.P50Ms) 'Scaling still measures latency in the structured summary.'
     Assert-True ($screen -notmatch 'Bounds:|version=|process=') 'Default traffic display omits verbose details.'
+    Assert-True ($screen -notmatch 'Unexpected|Candidate 503s|Timeouts|Cancelled|Counts cumulative|Requests cancelled|Instances above') 'Successful scaling display omits diagnostic counters and explanatory footer notes.'
     Assert-True ($summary.Success -eq 12 -and $summary.InFlight -eq 0) 'All bounded requests finish.'
+    Assert-True ($screen -match 'HTTP 200' -and $summary.Identities[0].StatusCounts[200] -eq 12) 'Each replica/process row counts its successful HTTP responses.'
     Assert-True ($server.MaxActive -ge 2 -and $server.MaxActive -le 4) 'Requests execute concurrently within the connection bound.'
     $records = @(Get-Content $results | ConvertFrom-Json)
     Assert-True ($records.Count -eq 12 -and $records[0].Replica -eq 'replica-test') 'JSONL includes request identity.'
@@ -174,6 +187,22 @@ try {
         Assert-True ($request.Headers['X-Demo-Run-Id'] -eq 'local-test') 'Run ID header.'
         Assert-True (!$request.Headers.ContainsKey('Cookie')) 'No cookies are replayed.'
     }
+    $verboseScreen = (& $trafficScript -ApplicationUrl $url -Scenario Scale -Concurrency 1 `
+        -DurationSeconds 5 -MaxRequests 1 -Verbose -NoClear 4>&1 6>&1 | Out-String)
+    Assert-True ($verboseScreen -match 'Unexpected 0 \| Timeouts 0 \| Cancelled 0' -and
+        $verboseScreen -match 'Counts cumulative' -and $verboseScreen -match 'Requests cancelled' -and
+        $verboseScreen -match 'Instances above') 'Verbose preserves diagnostic counters and explanatory footer notes.'
+    Assert-True ($verboseScreen -notmatch 'Candidate 503s') 'Scaling does not display release-only counters even in verbose mode.'
+    Assert-True ($verboseScreen -match 'LATENCY p50 \d+ms / p95 \d+ms') 'Verbose scaling displays latency.'
+    $before = $server.Requests.Count
+    $demoOutput = @(& $trafficScript -ConfigPath $trafficConfigPath -DurationSeconds 5 -MaxRequests 12 -PassThru -NoClear 6>&1)
+    $demoSummary = $demoOutput | Where-Object { $_.GetType().Name -eq 'Snapshot' }
+    $demoScreen = $demoOutput -join "`n"
+    Assert-True ($demoScreen -match 'MUSIC STORE \| LIVE TRAFFIC \| FINISHED' -and
+        $demoScreen -match 'Concurrency 32') 'No Scenario argument starts the unified 32-concurrency presenter workload.'
+    Assert-True ($demoSummary.Success -eq 12 -and $demoScreen -notmatch 'LATENCY|Candidate 503s|LAST 10s') 'Healthy unified traffic keeps the scaling display clean.'
+    $demoRequests = @($server.Requests.ToArray() | Select-Object -Skip $before)
+    Assert-True (@($demoRequests | Where-Object { $_.Headers['X-Demo-Operation'] -ne 'demo' }).Count -eq 0) 'Unified traffic always sends the same combined operation.'
     Assert-Fails { & $trafficScript -ApplicationUrl $url -Scenario Scale -OutputPath $results } 'already exists'
     Assert-Fails { & $trafficScript -ApplicationUrl 'http://example.com' -Scenario Scale } 'HTTPS origin'
     Assert-Fails { & $trafficScript -ApplicationUrl "$url/unexpected" -Scenario Scale } 'HTTPS origin'
@@ -193,7 +222,14 @@ try {
 
     $server.Mode = 'candidate'
     $before = $server.Requests.Count
-    $summary = & $trafficScript -ConfigPath $trafficConfigPath -Scenario Release -Concurrency 4 -DurationSeconds 10 -MaxRequests 55 -PassThru
+    $releaseOutput = @(& $trafficScript -ConfigPath $trafficConfigPath -Scenario Release -Concurrency 4 -DurationSeconds 10 -MaxRequests 55 -PassThru 6>&1)
+    $summary = $releaseOutput | Where-Object { $_.GetType().Name -eq 'Snapshot' }
+    Assert-True (($releaseOutput -join "`n") -match 'HTTP 503' -and
+        ($releaseOutput -join "`n") -match '(?m)^\s+candidate\s+replica-test\s+\S+\s+55\s+55\s*$') 'The candidate row displays all 55 responses under HTTP 503.'
+    Assert-True ($summary.Identities[0].StatusCounts[503] -eq 55) 'Candidate HTTP status totals are retained in the structured snapshot.'
+    Assert-True (($releaseOutput -join "`n") -notmatch 'Candidate 503s') 'The status table replaces separate candidate-specific labels.'
+    Assert-True (($releaseOutput -join "`n") -notmatch 'Expected regression:') 'Traffic omits the regression explanation label.'
+    Assert-True (($releaseOutput -join "`n") -match 'LATENCY p50') 'Release latency remains visible by default.'
     Assert-True ($summary.ExpectedCandidate503 -eq 55 -and $summary.Errors -eq 55 -and $summary.UnexpectedErrors -eq 0) 'Expected candidate 503s remain visible as errors without triggering the >=50-request safety stop.'
     $release = @($server.Requests.ToArray() | Select-Object -Skip $before)
     for ($i = 1; $i -lt $release.Count; $i++) {
@@ -201,18 +237,86 @@ try {
     }
     Assert-True ($release[0].Headers['X-Demo-Operation'] -eq 'release-check') 'Release operation header.'
 
+    $server.Mode = 'success'
+    $releaseEngine = $engineType::new(
+        $url, $env:MUSICSTORE_DEMO_TOKEN, 'rollback-test', 'Demo', 'candidate',
+        32, 0, 0, 5, 50, $null)
+    try {
+        $releaseTask = $releaseEngine.RunAsync()
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while ($releaseEngine.GetSnapshot().Success -eq 0 -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 50
+        }
+        Assert-True ($releaseEngine.GetSnapshot().RecentSuccess -gt 0 -and
+            $releaseEngine.GetSnapshot().RecentErrors -eq 0) 'One combined scaling/release run begins with a healthy baseline.'
+        $server.Mode = 'candidate'
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while ($releaseEngine.GetSnapshot().ExpectedCandidate503 -eq 0 -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 50
+        }
+        $exposed = $releaseEngine.GetSnapshot()
+        Assert-True ($exposed.RecentCandidate503 -gt 0 -and $exposed.RecentErrors -gt 0 -and
+            !$releaseTask.IsCompleted) 'Candidate exposure produces recent errors without restarting or stopping traffic.'
+        $server.Mode = 'success'
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        do {
+            Start-Sleep -Milliseconds 100
+            $rolledBack = $releaseEngine.GetSnapshot()
+        } while (($rolledBack.RecentErrors -gt 0 -or $rolledBack.RecentSuccess -eq 0) -and
+            [DateTime]::UtcNow -lt $deadline)
+        Assert-True ($rolledBack.RecentErrors -eq 0 -and $rolledBack.RecentCandidate503 -eq 0 -and
+            $rolledBack.RecentSuccess -gt 0 -and !$releaseTask.IsCompleted) 'Rollback clears recent errors while the same process continues serving successful responses.'
+        Assert-True ($rolledBack.ExpectedCandidate503 -ge $exposed.ExpectedCandidate503 -and
+            $rolledBack.Errors -gt 0 -and $rolledBack.Identities.Count -eq 2) 'Rollback preserves historical errors and both version identities.'
+        $healthyIdentity = $rolledBack.Identities | Where-Object Version -eq 'stable'
+        $candidateIdentity = $rolledBack.Identities | Where-Object Version -eq 'candidate'
+        Assert-True ($healthyIdentity.StatusCounts[200] -gt 0 -and $candidateIdentity.StatusCounts[503] -gt 0) 'Mixed-version traffic attributes HTTP 200 and 503 counts to the correct rows.'
+        Assert-True ($rolledBack.UnexpectedErrors -eq 0) 'Expected candidate errors never trigger the unexpected-error safety stop.'
+    }
+    finally {
+        $releaseEngine.Cancel()
+        $null = $releaseTask.GetAwaiter().GetResult()
+        $releaseEngine.Dispose()
+    }
+
+    $server.Mode = 'split'
+    $splitOutput = @(& $trafficScript -ApplicationUrl $url -CandidateVersion candidate -Concurrency 1 `
+        -DurationSeconds 5 -MaxRequests 12 -NoClear -PassThru 6>&1)
+    $splitScreen = $splitOutput -join "`n"
+    Assert-True ($splitScreen -match 'HTTP 200\s+HTTP 503' -and
+        $splitScreen -match '(?m)^\s+stable\s+replica-test\s+\S+\s+6\s+6\s+0\s*$' -and
+        $splitScreen -match '(?m)^\s+candidate\s+replica-test\s+\S+\s+6\s+0\s+6\s*$') 'The display aligns HTTP 200/503 columns and shows zero for statuses absent from each row.'
+    $server.Mode = 'mixed'
+    $statusEngine = $engineType::new(
+        $url, $env:MUSICSTORE_DEMO_TOKEN, 'status-counts-test', 'Demo', 'stable',
+        1, 5, 12, 5, 10, $null)
+    try {
+        $statusTask = $statusEngine.RunAsync()
+        $statusSummary = $statusTask.GetAwaiter().GetResult()
+        $identity = $statusSummary.Identities[0]
+        Assert-True ($statusSummary.Identities.Count -eq 1 -and $identity.Count -eq 12 -and
+            $identity.StatusCounts[200] -eq 6 -and $identity.StatusCounts[503] -eq 6) 'Different HTTP statuses aggregate into columns on the same replica/process row.'
+        $identity.StatusCounts[200] = 999
+        Assert-True ($statusEngine.GetSnapshot().Identities[0].StatusCounts[200] -eq 6) 'Snapshot status dictionaries are independent copies of engine state.'
+    }
+    finally { $statusEngine.Dispose() }
+
     $server.Mode = 'stable503'
     $server.DelayMs = 0
     $safetyPath = Join-Path $work 'safety.jsonl'
+    $failureScreen = [Collections.Generic.List[string]]::new()
     Assert-Fails {
-        & $trafficScript -ApplicationUrl $url -Scenario Scale -Concurrency 4 -DurationSeconds 10 -MaxRequests 100 -OutputPath $safetyPath
+        & $trafficScript -ApplicationUrl $url -Scenario Scale -Concurrency 4 -DurationSeconds 10 -MaxRequests 100 -OutputPath $safetyPath 6>&1 |
+            ForEach-Object { $failureScreen.Add([string]$_) }
     } 'Safety stop'
+    Assert-True (($failureScreen -join "`n") -match 'Unexpected [1-9]' -and
+        ($failureScreen -join "`n") -match 'FAILURE .*HttpError \| HTTP 503') 'Unexpected scaling failures show diagnostic counters and the failure category/status.'
     $safety = @(Get-Content $safetyPath | ConvertFrom-Json)
     Assert-True ($safety.Count -ge 50 -and $safety.Count -lt 100) 'Safety stop occurs after the sample threshold and before the request limit.'
     Assert-True ($safety[0].StatusCode -eq 503 -and $safety[0].Replica -eq 'replica-test') '503 identity retained.'
     Assert-Fails {
         & $trafficScript -ApplicationUrl $url -Scenario Release -CandidateVersion candidate -DurationSeconds 5 -MaxRequests 2
-    } 'unexpected errors'
+    } 'unexpected errors: 2x HttpError \| HTTP 503'
 
     foreach ($mode in 'missing', 'unauthorized') {
         $server.Mode = $mode
@@ -238,6 +342,7 @@ try {
     } 'unexpected errors'
     $transport = Get-Content $transportPath | ConvertFrom-Json
     Assert-True ($transport.Outcome -eq 'TransportError') 'Transport errors are explicit.'
+    Assert-True (![string]::IsNullOrWhiteSpace($transport.ErrorKind)) 'Transport errors retain the exception type without raw exception messages.'
     Assert-True (($server.Requests.Count - $before) -eq 1) 'A disconnected request is not retried.'
 
     $server.Mode = 'success'
@@ -260,6 +365,36 @@ try {
     $summary = & $trafficScript -ConfigPath $trafficConfigPath -Scenario Recovery -DurationSeconds 5 -MaxRequests 5 -PassThru
     $recovery = @($server.Requests.ToArray() | Select-Object -Skip $before)
     Assert-True ($summary.Success -eq 5 -and $recovery[0].Headers['X-Demo-Operation'] -eq 'observe') 'Recovery sends only the observe operation.'
+
+    foreach ($scenario in 'Demo', 'Scale', 'Release', 'Recovery') {
+        $server.SetupFailureAfter = $server.Requests.Count + 20
+        $continuousOutput = [Collections.Generic.List[string]]::new()
+        Assert-Fails {
+            & $trafficScript -ConfigPath $trafficConfigPath -Scenario $scenario -NoClear 6>&1 |
+                ForEach-Object { $continuousOutput.Add([string]$_) }
+        } 'Setup failure'
+        Assert-True (($continuousOutput -join "`n") -match 'Until Ctrl\+C \| No request cap') "$scenario defaults to continuous traffic without total-request or duration caps."
+    }
+    $server.SetupFailureAfter = 0
+    $continuousEngine = $engineType::new(
+        $url, $env:MUSICSTORE_DEMO_TOKEN, 'continuous-test', 'Scale', 'candidate',
+        4, 0, 0, 5, 0, $null)
+    try {
+        $continuousTask = $continuousEngine.RunAsync()
+        Start-Sleep -Milliseconds 500
+        $firstCount = $continuousEngine.GetSnapshot().Completed
+        Start-Sleep -Milliseconds 500
+        Assert-True (!$continuousTask.IsCompleted -and $continuousEngine.GetSnapshot().Completed -gt $firstCount) 'Continuous traffic keeps sending requests until cancelled.'
+        $continuousEngine.Cancel()
+        Assert-True ($continuousTask.Wait(5000)) 'Manual cancellation promptly drains owned requests.'
+        $continuousSummary = $continuousTask.GetAwaiter().GetResult()
+        Assert-True ($continuousSummary.Success -gt 0 -and $continuousSummary.InFlight -eq 0 -and $continuousSummary.UnexpectedErrors -eq 0) 'Manual cancellation leaves no in-flight requests or unexpected failures.'
+    }
+    finally {
+        $continuousEngine.Cancel()
+        $null = $continuousTask.GetAwaiter().GetResult()
+        $continuousEngine.Dispose()
+    }
     $server.Dispose()
     $server = $null
 
@@ -269,8 +404,44 @@ try {
 [IO.File]::WriteAllText("$env:DEMO_AZ_TEST_LOG.pid", [string]$PID)
 $args | ConvertTo-Json -Compress | Add-Content $env:DEMO_AZ_TEST_LOG
 if ($env:DEMO_AZ_TEST_MODE -eq 'failure') { [Console]::Error.WriteLine('mock authorization failure'); exit 7 }
+if ($env:DEMO_AZ_TEST_MODE -eq 'failure-after-first' -and @(Get-Content $env:DEMO_AZ_TEST_LOG).Count -gt 1) {
+    [Console]::Error.WriteLine('mock failure after continuous refresh'); exit 7
+}
 if ($env:DEMO_AZ_TEST_MODE -eq 'slow') { Start-Sleep -Seconds 10 }
 if ($env:DEMO_AZ_TEST_MODE -eq 'empty') { '[]'; exit 0 }
+if ($env:DEMO_AZ_TEST_MODE -eq 'revisions') {
+    $stepPath = "$env:DEMO_AZ_TEST_LOG.step"
+    if ($args[1] -eq 'revision') {
+        $step = if (Test-Path $stepPath) { [int](Get-Content $stepPath) + 1 } else { 1 }
+        Set-Content $stepPath $step
+        switch ($step) {
+            1 { '[{"name":"ca-test--v1","health":"Healthy","traffic":100}]' }
+            2 { '[{"name":"ca-test--v1","health":"Healthy","traffic":100},{"name":"ca-test--v2","health":"Activating","traffic":0}]' }
+            3 { '[{"name":"ca-test--v1","health":"Healthy","traffic":90},{"name":"ca-test--v2","health":"Healthy","traffic":10}]' }
+            4 { '[{"name":"ca-test--v2","health":"Healthy","traffic":100}]' }
+            default { [Console]::Error.WriteLine('mock completed revision lifecycle'); exit 9 }
+        }
+        exit 0
+    }
+    $step = [int](Get-Content $stepPath)
+    $revision = $args[[Array]::IndexOf($args, '--revision') + 1]
+    if ($revision -eq 'ca-test--v1') {
+        switch ($step) {
+            1 { '[{"name":"replica-a","containers":[{"ready":true,"restartCount":0,"containerId":"a1"}]}]' }
+            2 { '[{"name":"replica-a","containers":[{"ready":true,"restartCount":0,"containerId":"a1"}]},{"name":"replica-b","containers":[{"ready":false,"restartCount":0,"containerId":"b1"}]}]' }
+            default { '[{"name":"replica-a","containers":[{"ready":true,"restartCount":1,"containerId":"a2"}]},{"name":"replica-b","containers":[{"ready":true,"restartCount":0,"containerId":"b1"}]}]' }
+        }
+    }
+    elseif ($revision -eq 'ca-test--v2') {
+        switch ($step) {
+            2 { '[]' }
+            3 { '[{"name":"replica-a","containers":[{"ready":true,"restartCount":0,"containerId":"c1"}]}]' }
+            default { '[{"name":"replica-a","containers":[{"ready":true,"restartCount":0,"containerId":"c1"}]},{"name":"replica-b","containers":[{"ready":true,"restartCount":0,"containerId":"d1"}]}]' }
+        }
+    }
+    else { [Console]::Error.WriteLine('unexpected revision target'); exit 8 }
+    exit 0
+}
 if ($env:DEMO_AZ_TEST_MODE -eq 'slow-tail' -and @(Get-Content $env:DEMO_AZ_TEST_LOG).Count -gt 1) {
     Start-Sleep -Seconds 10
 }
@@ -280,7 +451,8 @@ if ($env:DEMO_AZ_TEST_MODE -eq 'changes') {
         1 { '[{"name":"replica-a","containers":[{"ready":true,"restartCount":0,"containerId":"a1"}]}]' }
         2 { '[{"name":"replica-a","containers":[{"ready":true,"restartCount":0,"containerId":"a1"}]},{"name":"replica-b","containers":[{"ready":false,"restartCount":0,"containerId":"b1"}]}]' }
         3 { '[{"name":"replica-a","containers":[{"ready":true,"restartCount":1,"containerId":"a2"}]},{"name":"replica-b","containers":[{"ready":true,"restartCount":0,"containerId":"b1"}]}]' }
-        default { '[{"name":"replica-b","containers":[{"ready":true,"restartCount":0,"containerId":"b1"}]}]' }
+        4 { '[{"name":"replica-b","containers":[{"ready":true,"restartCount":0,"containerId":"b1"}]}]' }
+        default { [Console]::Error.WriteLine('mock completed replica lifecycle'); exit 9 }
     }
     exit 0
 }
@@ -302,15 +474,14 @@ if ($env:DEMO_AZ_TEST_MODE -eq 'changes') {
         schemaVersion = 1
         deployment = @{subscriptionId='11111111-1111-4111-8111-111111111111';resourceGroupName='rg-test'}
         resources = @{containerAppName='ca-test'}
-        demo = @{healthyRevision='revision-test'}
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $testConfigPath
     $watchSettings = @{ ConfigPath = $testConfigPath }
     $env:DEMO_AZ_TEST_MODE = 'success'
-    $watchOutput = (& $watchScript @watchSettings -DurationSeconds 5 -CommandTimeoutSeconds 5 6>&1 | Out-String)
+    $watchOutput = (& $watchScript @watchSettings -Revision revision-test -DurationSeconds 10 -CommandTimeoutSeconds 10 6>&1 | Out-String)
     Assert-True ($watchOutput -match 'REPLICAS 1\s+\|\s+READY 1/1\s+\|\s+RESTARTS 2') 'Watch summarizes replica readiness and restarts.'
     Assert-True ($watchOutput -match 'R01\s+replica-test\s+READY\s+2') 'Watch shows a compact replica row.'
     Assert-True ($watchOutput -notmatch "az 'containerapp'|container-test") 'Default display hides CLI noise and full container IDs.'
-    $verboseOutput = (& $watchScript @watchSettings -Revision revision-test -DurationSeconds 5 -Verbose -NoClear 4>&1 6>&1 | Out-String)
+    $verboseOutput = (& $watchScript @watchSettings -Revision revision-test -DurationSeconds 10 -Verbose -NoClear 4>&1 6>&1 | Out-String)
     Assert-True ($verboseOutput -match "az 'containerapp' 'replica' 'list'.*--subscription.*--revision") 'Verbose preserves the exact read-only query.'
     Assert-True ($verboseOutput -match 'containerID=container-test') 'Verbose preserves full container identity.'
     $cliArgs = @(Get-Content $env:DEMO_AZ_TEST_LOG | Select-Object -First 1 | ConvertFrom-Json)
@@ -320,19 +491,56 @@ if ($env:DEMO_AZ_TEST_MODE -eq 'changes') {
     $emptyOutput = (& $watchScript @watchSettings -Revision revision-test -DurationSeconds 5 6>&1 | Out-String)
     Assert-True ($emptyOutput -match 'No replicas returned') 'Empty revision replica sets are visible.'
     Assert-True ($emptyOutput -match 'REPLICAS 0\s+\|\s+READY 0/0') 'Empty sets have zero totals.'
+    $emptyRevisions = (& $watchScript @watchSettings -DurationSeconds 10 -NoClear 6>&1 | Out-String)
+    Assert-True ($emptyRevisions -match 'REVISIONS 0 \| REPLICAS 0' -and
+        $emptyRevisions -match 'No active revisions returned') 'An app without active revisions is explicitly shown without inventing replica readiness.'
     Remove-Item -LiteralPath $env:DEMO_AZ_TEST_LOG
     $env:DEMO_AZ_TEST_MODE = 'changes'
-    $changesOutput = (& $watchScript @watchSettings -Revision revision-test -DurationSeconds 24 -NoClear 6>&1 | Out-String)
+    $changesLines = [Collections.Generic.List[string]]::new()
+    Assert-Fails {
+        & $watchScript @watchSettings -Revision revision-test -DurationSeconds 180 -NoClear 6>&1 |
+            ForEach-Object { $changesLines.Add([string]$_) }
+    } 'exit 9'
+    $changesOutput = $changesLines -join "`n"
     Assert-True ($changesOutput -match 'R02 added \(STARTING\)') 'Scale-out is highlighted with a stable label.'
     Assert-True ($changesOutput -match 'R02 STARTING -> READY') 'Readiness changes are highlighted.'
     Assert-True ($changesOutput -match 'R01 container restarted/replaced') 'Same-name container recovery is highlighted.'
     Assert-True ($changesOutput -match 'R01 removed') 'Scale-in is highlighted.'
+    Remove-Item -LiteralPath $env:DEMO_AZ_TEST_LOG
+    $env:DEMO_AZ_TEST_MODE = 'revisions'
+    $revisionLines = [Collections.Generic.List[string]]::new()
+    Assert-Fails {
+        & $watchScript @watchSettings -DurationSeconds 180 -NoClear 6>&1 |
+            ForEach-Object { $revisionLines.Add([string]$_) }
+    } 'exit 9'
+    $revisionOutput = $revisionLines -join "`n"
+    Assert-True ($revisionOutput -match 'Revision v2 added' -and
+        $revisionOutput -match 'Revision: v2 \| Traffic 0% \| Activating \| READY 0/0' -and
+        $revisionOutput -match 'No replicas returned') 'New zero-traffic revisions appear before replicas exist.'
+    Assert-True ($revisionOutput -match 'Revision: v1 \| Traffic 90%' -and
+        $revisionOutput -match 'Revision: v2 \| Traffic 10%') 'Routing weight changes are discovered in the running observer.'
+    Assert-True ($revisionOutput -match 'REVISIONS 2 \| REPLICAS 3\s+\|\s+READY 3/3\s+\|\s+RESTARTS 1') 'Totals include all revision groups.'
+    Assert-True ($revisionOutput -match 'R01\s+replica-a\s+READY' -and
+        $revisionOutput -match 'R03\s+replica-a\s+READY' -and
+        $revisionOutput -match 'R03 added \(READY\) in v2') 'Replica labels are revision-scoped even when instance names collide.'
+    Assert-True ($revisionOutput -match 'Revision v1 no longer active' -and
+        $revisionOutput -match 'R04 added \(READY\) in v2') 'Revision removal and later replica additions appear without restarting Watch.'
+    $discoveryCalls = @(Get-Content $env:DEMO_AZ_TEST_LOG | ForEach-Object { ,@(ConvertFrom-Json $_) })
+    Assert-True (@($discoveryCalls | Where-Object { $_[1] -eq 'revision' }).Count -eq 5) 'Watch rediscovers revisions on every snapshot.'
+    Assert-True (@($discoveryCalls | Where-Object { $_[1] -notin 'revision', 'replica' -or $_[2] -ne 'list' }).Count -eq 0) 'Multi-revision discovery uses only read-only list commands.'
     Remove-Item -LiteralPath $env:DEMO_AZ_TEST_LOG
     $env:DEMO_AZ_TEST_MODE = 'slow-tail'
     $tailOutput = (& $watchScript @watchSettings -Revision revision-test -DurationSeconds 9 -CommandTimeoutSeconds 5 -NoClear 6>&1 | Out-String)
     Assert-True ($tailOutput -match 'REPLICAS 1') 'Normal duration expiry during a final refresh is not a query failure.'
     $env:DEMO_AZ_TEST_MODE = 'failure'
     Assert-Fails { & $watchScript @watchSettings -Revision revision-test -DurationSeconds 5 } 'exit 7'
+    Remove-Item -LiteralPath $env:DEMO_AZ_TEST_LOG
+    $env:DEMO_AZ_TEST_MODE = 'failure-after-first'
+    $watchAst = [Management.Automation.Language.Parser]::ParseFile($watchScript, [ref]$null, [ref]$null)
+    $durationParameter = $watchAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'DurationSeconds' }
+    Assert-True ($null -eq $durationParameter.DefaultValue) 'Watch has no default duration limit.'
+    Assert-Fails { & $watchScript @watchSettings -Revision revision-test -CommandTimeoutSeconds 30 } 'exit 7'
+    Assert-True (@(Get-Content $env:DEMO_AZ_TEST_LOG).Count -eq 2) 'Continuous Watch refreshes without a duration argument and still surfaces CLI failures.'
     $env:DEMO_AZ_TEST_MODE = 'slow'
     Assert-Fails { & $watchScript @watchSettings -Revision revision-test -DurationSeconds 6 -CommandTimeoutSeconds 3 } 'timed out'
     $mockPid = [int](Get-Content "$env:DEMO_AZ_TEST_LOG.pid")

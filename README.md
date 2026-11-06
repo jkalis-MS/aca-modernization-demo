@@ -129,6 +129,11 @@ Deployment tradeoffs:
 
 ### Operational demo preparation
 
+Follow [the presenter runbook](PRESENTER_RUNBOOK.md) for the three live scenarios.
+Every command block identifies its terminal: CONTROL, TRAFFIC, or WATCH.
+Keep machine-specific paths and presenter edits in the ignored
+`config\PRESENTER_RUNBOOK.local.md` copy; the shared runbook is a portable template.
+
 Prepare healthy and candidate images in an isolated Consumption environment in
 your selected region. Keep public traffic pinned to the healthy revision and
 stage the candidate at 0% traffic. Update demo revision/version references locally
@@ -152,15 +157,17 @@ argument.
 Only authenticated synthetic GET requests to `/Store/Browse?genre=Rock` change
 behavior: `scale` adds a fixed cancellable 500 ms asynchronous delay before the
 normal SQL/MVC action; `release-check` returns an intentional 503 in the candidate
-image only; `observe` executes normal browsing. Ordinary requests and probes are
+image only; `demo` combines that same scaling delay and candidate regression in
+every request; `observe` executes normal browsing. Ordinary requests and probes are
 unchanged. Missing/invalid tokens receive 403; disabled operations receive 404.
 Authorized responses include version, revision, replica, process UUID/start
 time, request trace ID, and active synthetic-request count. The same identities
 and run IDs appear in structured logs/traces. There is no HTTP crash endpoint.
 
-PowerShell 7.2+ controls **requests and observation only**:
+PowerShell 7.4+ controls **requests and observation only**:
 
 ```powershell
+$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true
 $Config = .\scripts\Get-AzureLocalConfig.ps1 -RequiredSettings deployment.resourceGroupName,resources.containerAppName,demo.healthyRevision
 $Subscription = $Config.deployment.subscriptionId
 $ResourceGroup = $Config.deployment.resourceGroupName
@@ -175,39 +182,82 @@ $env:MUSICSTORE_DEMO_TOKEN = az keyvault secret show `
     --subscription $Subscription --vault-name $Config.resources.keyVaultName `
     --name $Config.demo.tokenSecretName --version $Config.demo.tokenSecretVersion `
     --query value --output tsv
-if ($LASTEXITCODE -ne 0) { throw 'Cannot read demo credential.' }
 
 # Run in a separate terminal; a compact status screen refreshes in place.
 .\scripts\Watch-Demo.ps1
 
-# These commands generate real traffic; run only when ready to demonstrate.
-.\scripts\Invoke-DemoTraffic.ps1 -Scenario Scale
-.\scripts\Invoke-DemoTraffic.ps1 -Scenario Release
-.\scripts\Invoke-DemoTraffic.ps1 -Scenario Recovery
+# Start once for scaling, candidate exposure, and rollback; Ctrl+C stops it.
+.\scripts\Invoke-DemoTraffic.ps1
 
 Remove-Item Env:\MUSICSTORE_DEMO_TOKEN
 ```
 
-Release uses `demo.candidateVersion` unless an explicit `-CandidateVersion` is
+The default combined demo and standalone Release use `demo.candidateVersion`
+unless an explicit `-CandidateVersion` is
 supplied. Set it to the baked candidate version, not the revision name.
+Start default traffic once at healthy 100% and leave that exact same process
+running through scaling, candidate exposure, and rollback. No `-Scenario` argument
+or traffic restart is needed. After candidate errors first appear, `LAST 10s` shows
+recent successes/errors, so errors visibly subside after rollback
+without restarting TRAFFIC. Totals and responding identities remain cumulative;
+past failures are never erased. No recent responses is not a successful rollback.
+Continued load can keep the extra replicas warm; stop traffic after rollback to
+demonstrate natural scale-in.
+
+When setting up or upgrading a deployment, the combined `demo` operation requires
+both images built from the updated application code. Older images supporting only
+`scale`, `release-check`, and `observe` reject it; updating PowerShell alone does
+not update the live app. Stage and rehearse both revisions offstage.
+Explicit `-Scenario Scale`, `Release`, and `Recovery` remain available for isolated
+checks and backwards compatibility; they are not required for the combined demo.
 
 The request generator never changes Azure resources or crashes a container.
+Engine types are cached by source hash, so script updates take effect on the
+next invocation even in a PowerShell session that loaded an older engine.
 It refreshes a compact traffic screen with concurrency, average completion rate,
-latency, explicit error counts, and up to eight responding process identities.
+explicit error counts, and up to eight responding process identities. Each
+replica/process row has cumulative counts in dynamically added HTTP-status columns
+(for example `HTTP 200` and `HTTP 503`); error-status rows are highlighted red.
+Responses without a verified replica identity remain in the overall diagnostics
+rather than being attributed to an invented replica. Scaling
+and default combined-demo latency are displayed only with `-Verbose`; standalone
+Release and Recovery retain visible latency.
+Latency measurements remain available in structured summaries and JSONL.
 These identity counts are cumulative, not a readiness inventory. Add `-Verbose`
 for full identities/bounds or `-NoClear` for scrolling snapshots. Structured
 summary objects are returned only with `-PassThru`; JSONL output is unchanged.
-The observer shows replica/ready/restart totals, stable short replica labels,
-and the four most recent observed changes. `STARTING` means the web container
+Detailed unexpected-error/timeout/cancellation counters appear only on unexpected
+failures or with `-Verbose`. Candidate failures appear naturally in their row's
+`HTTP 503` column, without a separate regression explanation or candidate label.
+Explanatory footer notes are verbose-only, keeping the default presentation clean.
+Unexpected failures show counts by outcome, HTTP status (or no response), and
+transport exception type where available. Raw exception messages are not logged.
+Requests cancelled when stopping are separate from unexpected failures.
+The observer runs until Ctrl+C by default. Optional `-DurationSeconds` (1–1,800) bounds
+automated observation; each Azure CLI query still has its own timeout.
+By default it rediscovers all active revisions on every refresh, including those
+at 0% traffic, and groups replicas under revision headings with traffic weights
+and health. New revisions appear even before their first replica; replica
+additions, readiness changes, restarts, and revisions leaving the active set are
+highlighted without restarting WATCH. The summary totals span all displayed
+revisions. Use `-Revision <name>` to explicitly observe just one revision; the
+default no longer depends on `demo.healthyRevision`.
+It shows replica/ready/restart totals, stable revision-scoped replica labels, and
+the four most recent observed changes. `STARTING` means the web container
 is not ready; it is not a diagnosis. Add `-Verbose` for full Azure CLI commands
 and container IDs, or `-NoClear` for scrolling snapshots instead of a refreshing
 screen. Redirected output also uses snapshots. Labels identify replicas, not
 process lifetimes; container replacement is shown in recent changes even if the
 replica name stays the same.
-Defaults: Scale 32 slots/150 seconds; Release 4 slots/up to 10 requests per
-second/60 seconds/600 requests; Recovery 8 slots/up to 20 requests per second/
-120 seconds/2,000 requests. Hard caps are 64 slots, 180 seconds, 15,000 requests,
-and a 15-second individual timeout. Ctrl+C stops owned requests. Optional
+Traffic runs continuously until Ctrl+C by default, without a duration or total
+request cap. Default combined traffic and standalone Scale maintain 32 concurrent
+requests; standalone Release uses 4
+slots/up to 10 requests per second; Recovery uses 8 slots/up to 20 requests per
+second. Scale throughput depends on response time, not a fixed requests/second
+target. Authentication/setup failures and the high-error-rate safety stop still
+stop traffic. Concurrency is capped at 64 and individual timeouts at 15 seconds.
+Optional `-DurationSeconds` (1–180) and `-MaxRequests` (1–15,000) bound automated
+runs; either can be supplied independently. Ctrl+C cancels and drains owned requests. Optional
 `-RunId <slug> -OutputPath <new-file.jsonl>` saves identity/status/latency results
 without credentials; existing files are not overwritten. Percentiles use the
 latest 2,048 completions. Cookies, redirects, configured retries, and proxy use
@@ -227,16 +277,14 @@ $V2 = "ops-v2-$BuildId"
 az acr build --subscription $Subscription --registry $Config.resources.registryName `
     --image "musicstore:$V1" --file $Dockerfile --platform linux/amd64 `
     --build-arg "DEMO_VERSION=$V1" --build-arg DEMO_RELEASE_REGRESSION=false $Context
-if ($LASTEXITCODE -ne 0) { throw 'Healthy build failed.' }
 az acr build --subscription $Subscription --registry $Config.resources.registryName `
     --image "musicstore:$V2" --file $Dockerfile --platform linux/amd64 `
     --build-arg "DEMO_VERSION=$V2" --build-arg DEMO_RELEASE_REGRESSION=true $Context
-if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed.' }
 
 # Existing named traffic must remain pinned before creating another revision.
 $Digest = az acr repository show --subscription $Subscription `
     --name $Config.resources.registryName --image "musicstore:$V2" --query digest -o tsv
-if ($LASTEXITCODE -ne 0 -or $Digest -notmatch '^sha256:[0-9a-f]{64}$') {
+if ($Digest -notmatch '^sha256:[0-9a-f]{64}$') {
     throw 'Candidate digest lookup failed.'
 }
 az containerapp revision copy --subscription $Subscription `

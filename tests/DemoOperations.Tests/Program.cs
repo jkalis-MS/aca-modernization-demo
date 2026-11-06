@@ -125,6 +125,29 @@ await releaseFeature.StartAsync();
 Check(release.Response.StatusCode == (regression ? 503 : 200), "Wrong baked release behavior.");
 Check(releaseNextCalls == (regression ? 0 : 1), "Candidate regression reached the database action.");
 Check(release.Response.Headers["X-Demo-Version"] == "test-version", "Release identity missing on error.");
+timer.Restart();
+var combined = Request("demo");
+var combinedFeature = new StartingResponseFeature { Body = combined.Response.Body };
+combined.Features.Set<IHttpResponseFeature>(combinedFeature);
+var combinedNextCalls = 0;
+await Middleware(true, next: context =>
+{
+    combinedNextCalls++;
+    return context.Response.WriteAsync("catalog");
+}).InvokeAsync(combined);
+await combinedFeature.StartAsync();
+Check(timer.ElapsedMilliseconds >= 450, "Combined demo skipped the scaling delay.");
+Check(combined.Response.StatusCode == (regression ? 503 : 200), "Combined demo lost baked release behavior.");
+Check(combinedNextCalls == (regression ? 0 : 1), "Combined candidate regression reached the database action.");
+Check(combined.Response.Headers["X-Demo-Version"] == "test-version", "Combined identity missing.");
+var cancelledCombined = Request("demo");
+cancelledCombined.RequestAborted = cancelled.Token;
+try
+{
+    await Middleware(true).InvokeAsync(cancelledCombined);
+    throw new InvalidOperationException("Combined delay ignored cancellation.");
+}
+catch (OperationCanceledException) { checks++; }
 var ordinaryCandidate = Request();
 ordinaryCandidate.Request.Headers.Remove("X-Demo-Operation");
 await Middleware(true).InvokeAsync(ordinaryCandidate);

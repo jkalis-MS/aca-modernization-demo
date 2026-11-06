@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [uri]$ApplicationUrl,
-    [Parameter(Mandatory)][ValidateSet('Scale', 'Release', 'Recovery')][string]$Scenario,
+    [ValidateSet('Demo', 'Scale', 'Release', 'Recovery')][string]$Scenario = 'Demo',
     [ValidatePattern('\A[a-z0-9][a-z0-9-]{0,62}\z', Options = 'None')]
     [string]$RunId = "demo-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))-$([Guid]::NewGuid().ToString('N').Substring(0, 8))",
     [ValidateRange(1, 64)][int]$Concurrency,
@@ -21,13 +21,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $required = @()
 if (!$PSBoundParameters.ContainsKey('ApplicationUrl')) { $required += 'resources.applicationUrl' }
-if ($Scenario -eq 'Release' -and !$PSBoundParameters.ContainsKey('CandidateVersion')) {
+$releaseChecks = $Scenario -in 'Demo', 'Release'
+if ($releaseChecks -and !$PSBoundParameters.ContainsKey('CandidateVersion')) {
     $required += 'demo.candidateVersion'
 }
 if ($required.Count) {
     $config = & (Join-Path $PSScriptRoot 'Get-AzureLocalConfig.ps1') -ConfigPath $ConfigPath -RequiredSettings $required
     if (!$PSBoundParameters.ContainsKey('ApplicationUrl')) { $ApplicationUrl = [uri]$config.resources.applicationUrl }
-    if ($Scenario -eq 'Release' -and !$PSBoundParameters.ContainsKey('CandidateVersion')) {
+    if ($releaseChecks -and !$PSBoundParameters.ContainsKey('CandidateVersion')) {
         $CandidateVersion = $config.demo.candidateVersion
     }
 }
@@ -44,17 +45,18 @@ if ([string]::IsNullOrWhiteSpace($token) -or $token.Length -gt 4096 -or $token -
     throw 'Set MUSICSTORE_DEMO_TOKEN to a nonempty printable ASCII token without whitespace before running traffic.'
 }
 $defaults = @{
-    Scale = @{ Concurrency = 32; DurationSeconds = 150; MaxRequests = 12000; RequestsPerSecond = 0 }
-    Release = @{ Concurrency = 4; DurationSeconds = 60; MaxRequests = 600; RequestsPerSecond = 10 }
-    Recovery = @{ Concurrency = 8; DurationSeconds = 120; MaxRequests = 2000; RequestsPerSecond = 20 }
+    Demo = @{ Concurrency = 32; RequestsPerSecond = 0 }
+    Scale = @{ Concurrency = 32; RequestsPerSecond = 0 }
+    Release = @{ Concurrency = 4; RequestsPerSecond = 10 }
+    Recovery = @{ Concurrency = 8; RequestsPerSecond = 20 }
 }
-foreach ($name in 'Concurrency', 'DurationSeconds', 'MaxRequests', 'RequestsPerSecond') {
+foreach ($name in 'Concurrency', 'RequestsPerSecond') {
     if (!$PSBoundParameters.ContainsKey($name)) {
         Set-Variable -Name $name -Value $defaults[$Scenario][$name]
     }
 }
-if ($Scenario -eq 'Release' -and ($RequestsPerSecond -le 0 -or $RequestsPerSecond -gt 10 -or $MaxRequests -gt 600)) {
-    throw 'Release is limited to 600 requests and a nonzero rate of at most 10 requests/second.'
+if ($Scenario -eq 'Release' -and ($RequestsPerSecond -le 0 -or $RequestsPerSecond -gt 10)) {
+    throw 'Release requires a nonzero rate of at most 10 requests/second.'
 }
 if ([double]::IsNaN($RequestsPerSecond) -or [double]::IsInfinity($RequestsPerSecond)) {
     throw 'RequestsPerSecond must be finite.'
@@ -63,8 +65,7 @@ if ($CandidateVersion.Length -gt 256 -or $CandidateVersion -match '[\r\n]') {
     throw 'CandidateVersion must be a single-line version of at most 256 characters.'
 }
 
-if (!('MusicStoreDemoTraffic.Engine' -as [type])) {
-    Add-Type -TypeDefinition @'
+$engineSource = @'
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -87,6 +88,7 @@ namespace MusicStoreDemoTraffic
         public string Scenario { get; set; }
         public int StatusCode { get; set; }
         public string Outcome { get; set; }
+        public string ErrorKind { get; set; }
         public double DurationMs { get; set; }
         public string Version { get; set; }
         public string Revision { get; set; }
@@ -103,6 +105,7 @@ namespace MusicStoreDemoTraffic
         public string Replica { get; set; }
         public string Process { get; set; }
         public int Count { get; set; }
+        public Dictionary<int, int> StatusCounts { get; set; } = new Dictionary<int, int>();
     }
 
     public sealed class Snapshot
@@ -116,6 +119,11 @@ namespace MusicStoreDemoTraffic
         public int ExpectedCandidate503 { get; set; }
         public int Timeouts { get; set; }
         public int Cancellations { get; set; }
+        public int RecentCompleted { get; set; }
+        public int RecentSuccess { get; set; }
+        public int RecentErrors { get; set; }
+        public int RecentCandidate503 { get; set; }
+        public Dictionary<string, int> FailureCounts { get; set; }
         public double P50Ms { get; set; }
         public double P95Ms { get; set; }
         public IdentityCount[] Identities { get; set; }
@@ -133,9 +141,12 @@ namespace MusicStoreDemoTraffic
         private readonly CancellationTokenSource stop = new CancellationTokenSource();
         private readonly Stopwatch clock = new Stopwatch();
         private readonly List<double> latencies = new List<double>(2048);
+        private readonly Queue<(double Time, string Outcome)> recent = new Queue<(double, string)>();
         private readonly Dictionary<string, IdentityCount> identities = new Dictionary<string, IdentityCount>();
+        private readonly Dictionary<string, int> failureCounts = new Dictionary<string, int>();
         private readonly Uri endpoint;
         private readonly string token, runId, scenario, operation, candidateVersion;
+        private readonly bool releaseChecks;
         private readonly int concurrency, duration, maxRequests, timeout;
         private readonly double rate;
         private readonly TextWriter writer;
@@ -156,7 +167,9 @@ namespace MusicStoreDemoTraffic
             this.timeout = timeout;
             this.rate = rate;
             this.writer = writer;
-            operation = scenario == "Scale" ? "scale" : scenario == "Release" ? "release-check" : "observe";
+            releaseChecks = scenario == "Demo" || scenario == "Release";
+            operation = scenario == "Demo" ? "demo" : scenario == "Scale" ? "scale"
+                : scenario == "Release" ? "release-check" : "observe";
             var handler = new SocketsHttpHandler {
                 AllowAutoRedirect = false,
                 UseCookies = false,
@@ -228,7 +241,7 @@ namespace MusicStoreDemoTraffic
                             result.Outcome = "SetupError";
                         else if (response.IsSuccessStatusCode)
                             result.Outcome = "Success";
-                        else if (scenario == "Release" && result.StatusCode == 503 &&
+                        else if (releaseChecks && result.StatusCode == 503 &&
                                  String.Equals(result.Version, candidateVersion, StringComparison.Ordinal))
                             result.Outcome = "ExpectedCandidate503";
                         else
@@ -251,14 +264,16 @@ namespace MusicStoreDemoTraffic
                     if (result.Outcome != "SetupError")
                         result.Outcome = stop.IsCancellationRequested ? "Cancelled" : "Timeout";
                 }
-                catch (HttpRequestException)
+                catch (HttpRequestException error)
                 {
+                    result.ErrorKind = error.GetBaseException().GetType().Name;
                     if (result.Outcome != "SetupError")
                         result.Outcome = stop.IsCancellationRequested ? "Cancelled"
                             : deadline.IsCancellationRequested ? "Timeout" : "TransportError";
                 }
-                catch (IOException)
+                catch (IOException error)
                 {
+                    result.ErrorKind = error.GetBaseException().GetType().Name;
                     if (result.Outcome != "SetupError")
                         result.Outcome = stop.IsCancellationRequested ? "Cancelled"
                             : deadline.IsCancellationRequested ? "Timeout" : "TransportError";
@@ -273,6 +288,9 @@ namespace MusicStoreDemoTraffic
             lock (gate)
             {
                 completed++;
+                if (releaseChecks && result.Outcome != "Cancelled")
+                    recent.Enqueue((clock.Elapsed.TotalSeconds, result.Outcome));
+                TrimRecent();
                 if (latencies.Count < 2048) latencies.Add(result.DurationMs);
                 else latencies[(completed - 1) % 2048] = result.DurationMs;
                 switch (result.Outcome)
@@ -280,18 +298,38 @@ namespace MusicStoreDemoTraffic
                     case "Success": success++; break;
                     case "ExpectedCandidate503": expected503++; break;
                     case "Cancelled": cancellations++; break;
-                    default: unexpectedErrors++; break;
+                    default:
+                        unexpectedErrors++;
+                        string failure = result.Outcome + " | HTTP " +
+                            (result.StatusCode == 0 ? "no response" : result.StatusCode.ToString()) +
+                            (result.ErrorKind == null ? "" : " | " + result.ErrorKind);
+                        int failureCount;
+                        failureCounts.TryGetValue(failure, out failureCount);
+                        failureCounts[failure] = failureCount + 1;
+                        break;
                 }
                 if (result.Outcome == "Timeout") timeouts++;
                 if (result.Version != null && result.Revision != null && result.Replica != null && result.Process != null)
                 {
                     string key = String.Join("\u001f", result.Version, result.Revision, result.Replica, result.Process);
                     IdentityCount count;
-                    if (identities.TryGetValue(key, out count)) count.Count++;
-                    else if (identities.Count < 256)
-                        identities.Add(key, new IdentityCount { Version = result.Version, Revision = result.Revision,
-                            Replica = result.Replica, Process = result.Process, Count = 1 });
-                    else otherIdentities++;
+                    if (!identities.TryGetValue(key, out count))
+                    {
+                        if (identities.Count < 256)
+                        {
+                            count = new IdentityCount { Version = result.Version, Revision = result.Revision,
+                                Replica = result.Replica, Process = result.Process };
+                            identities.Add(key, count);
+                        }
+                        else otherIdentities++;
+                    }
+                    if (count != null)
+                    {
+                        count.Count++;
+                        int statusCount;
+                        count.StatusCounts.TryGetValue(result.StatusCode, out statusCount);
+                        count.StatusCounts[result.StatusCode] = statusCount + 1;
+                    }
                 }
                 if (result.Outcome == "SetupError")
                     stopReason = "Setup failure: authentication rejected or required demo identity headers missing/invalid.";
@@ -305,7 +343,7 @@ namespace MusicStoreDemoTraffic
         public async Task<Snapshot> RunAsync()
         {
             clock.Start();
-            stop.CancelAfter(TimeSpan.FromSeconds(duration));
+            if (duration > 0) stop.CancelAfter(TimeSpan.FromSeconds(duration));
             var pending = new List<Task<Result>>(concurrency);
             double nextStart = 0;
             try
@@ -317,14 +355,15 @@ namespace MusicStoreDemoTraffic
                         pending.Remove(task);
                         Record(await task.ConfigureAwait(false));
                     }
-                    while (!stop.IsCancellationRequested && clock.Elapsed.TotalSeconds < duration &&
-                           started < maxRequests && pending.Count < concurrency && clock.Elapsed.TotalSeconds >= nextStart)
+                    while (!stop.IsCancellationRequested && (duration == 0 || clock.Elapsed.TotalSeconds < duration) &&
+                           (maxRequests == 0 || started < maxRequests) &&
+                           pending.Count < concurrency && clock.Elapsed.TotalSeconds >= nextStart)
                     {
                         lock (gate) started++;
                         pending.Add(SendAsync());
                         if (rate > 0) nextStart = clock.Elapsed.TotalSeconds + 1.0 / rate;
                     }
-                    if (pending.Count == 0 && (stop.IsCancellationRequested || started >= maxRequests)) break;
+                    if (pending.Count == 0 && (stop.IsCancellationRequested || (maxRequests > 0 && started >= maxRequests))) break;
                     double waitMs = rate > 0 && pending.Count < concurrency
                         ? Math.Max(1, Math.Min(25, (nextStart - clock.Elapsed.TotalSeconds) * 1000)) : 25;
                     var wake = Task.Delay((int)waitMs);
@@ -344,19 +383,31 @@ namespace MusicStoreDemoTraffic
             return GetSnapshot();
         }
 
+        private void TrimRecent()
+        {
+            double cutoff = clock.Elapsed.TotalSeconds - 10;
+            while (recent.Count > 0 && recent.Peek().Time <= cutoff) recent.Dequeue();
+        }
+
         public Snapshot GetSnapshot()
         {
             lock (gate)
             {
+                TrimRecent();
                 var samples = latencies.OrderBy(x => x).ToArray();
                 return new Snapshot {
                     Started = started, Completed = completed, InFlight = started - completed, Success = success,
                     Errors = unexpectedErrors + expected503, UnexpectedErrors = unexpectedErrors,
                     ExpectedCandidate503 = expected503, Timeouts = timeouts, Cancellations = cancellations,
+                    RecentCompleted = recent.Count, RecentSuccess = recent.Count(x => x.Outcome == "Success"),
+                    RecentErrors = recent.Count(x => x.Outcome != "Success"),
+                    RecentCandidate503 = recent.Count(x => x.Outcome == "ExpectedCandidate503"),
+                    FailureCounts = new Dictionary<string, int>(failureCounts),
                     P50Ms = samples.Length == 0 ? 0 : samples[(int)Math.Ceiling(samples.Length * 0.50) - 1],
                     P95Ms = samples.Length == 0 ? 0 : samples[(int)Math.Ceiling(samples.Length * 0.95) - 1],
                     Identities = identities.Values.Select(x => new IdentityCount { Version = x.Version,
-                        Revision = x.Revision, Replica = x.Replica, Process = x.Process, Count = x.Count }).ToArray(),
+                        Revision = x.Revision, Replica = x.Replica, Process = x.Process, Count = x.Count,
+                        StatusCounts = new Dictionary<int, int>(x.StatusCounts) }).ToArray(),
                     OtherIdentityCount = otherIdentities, StopReason = stopReason, ElapsedSeconds = clock.Elapsed.TotalSeconds
                 };
             }
@@ -367,32 +418,62 @@ namespace MusicStoreDemoTraffic
     }
 }
 '@
+# PowerShell cannot replace loaded types; isolate each engine source version.
+$engineHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($engineSource)))
+$engineNamespace = "MusicStoreDemoTraffic_$engineHash"
+$engineType = "$engineNamespace.Engine" -as [type]
+if (!$engineType) {
+    $engineSource = $engineSource.Replace('namespace MusicStoreDemoTraffic', "namespace $engineNamespace")
+    $engineType = Add-Type -TypeDefinition $engineSource -PassThru | Where-Object Name -EQ 'Engine'
 }
 
-$refreshScreen = !$NoClear -and !$VerbosePreference.Equals('Continue') -and
+$refreshScreen = !$NoClear -and $VerbosePreference -ne 'Continue' -and
     ![Console]::IsOutputRedirected -and $Host.Name -eq 'ConsoleHost'
 
 function Show-TrafficStatus {
     param($Snapshot, [switch]$Finished)
     if ($refreshScreen) { Clear-Host }
     $state = if ($Snapshot.StopReason) { 'STOPPED' } elseif ($Finished) { 'FINISHED' } else { 'RUNNING' }
-    $color = if ($Snapshot.UnexpectedErrors -or $Snapshot.StopReason) { 'Red' } elseif ($Snapshot.Errors) { 'Yellow' } else { 'Green' }
+    $color = if ($Snapshot.UnexpectedErrors -or $Snapshot.StopReason) { 'Red' } elseif (
+        ($releaseChecks -and (!$Snapshot.RecentCompleted -or $Snapshot.RecentErrors)) -or
+        (!$releaseChecks -and $Snapshot.Errors)) { 'Yellow' } else { 'Green' }
     $rate = if ($Snapshot.ElapsedSeconds -gt 0) { $Snapshot.Completed / $Snapshot.ElapsedSeconds } else { 0 }
     $replicaCount = @($Snapshot.Identities | Select-Object -ExpandProperty Replica -Unique).Count
     Write-Host ''
-    Write-Host "  MUSIC STORE | $($Scenario.ToUpperInvariant()) | $state" -ForegroundColor Cyan
-    Write-Host ('  Elapsed {0:N0}/{1}s | Limit {2:N0} requests | Concurrency {3}' -f
-        $Snapshot.ElapsedSeconds, $DurationSeconds, $MaxRequests, $Concurrency)
+    $trafficLabel = if ($Scenario -eq 'Demo') { 'LIVE TRAFFIC' } else { $Scenario.ToUpperInvariant() }
+    Write-Host "  MUSIC STORE | $trafficLabel | $state" -ForegroundColor Cyan
+    $durationLabel = if ($DurationSeconds) { "/${DurationSeconds}s" } else { 's | Until Ctrl+C' }
+    $requestLabel = if ($MaxRequests) { '{0:N0} requests' -f $MaxRequests } else { 'No request cap' }
+    Write-Host ('  Elapsed {0:N0}{1} | {2} | Concurrency {3}' -f
+        $Snapshot.ElapsedSeconds, $durationLabel, $requestLabel, $Concurrency)
     Write-Host ''
     Write-Host ('  IN FLIGHT {0}   |   RESPONDING REPLICAS {1}   |   AVG {2:N1}/s' -f
         $Snapshot.InFlight, $replicaCount, $rate) -ForegroundColor $color
-    Write-Host ('  SUCCESS {0:N0}   |   ERRORS {1:N0}   |   LATENCY p50 {2:N0}ms / p95 {3:N0}ms' -f
-        $Snapshot.Success, $Snapshot.Errors, $Snapshot.P50Ms, $Snapshot.P95Ms) -ForegroundColor $color
-    Write-Host ('  Unexpected {0} | Candidate 503s {1} | Timeouts {2} | Cancelled {3}' -f
-        $Snapshot.UnexpectedErrors, $Snapshot.ExpectedCandidate503, $Snapshot.Timeouts, $Snapshot.Cancellations)
+    $latencyLabel = if ($Scenario -notin 'Demo', 'Scale' -or $VerbosePreference -eq 'Continue') {
+        '   |   LATENCY p50 {0:N0}ms / p95 {1:N0}ms' -f $Snapshot.P50Ms, $Snapshot.P95Ms
+    } else { '' }
+    $totalLabel = if ($releaseChecks) { 'TOTAL ' } else { '' }
+    Write-Host (('  {0}SUCCESS {1:N0}   |   ERRORS {2:N0}' -f
+        $totalLabel, $Snapshot.Success, $Snapshot.Errors) + $latencyLabel) -ForegroundColor $color
+    $showReleaseStatus = $Scenario -eq 'Release' -or ($Scenario -eq 'Demo' -and $Snapshot.ExpectedCandidate503 -gt 0)
+    if ($showReleaseStatus) {
+        Write-Host ('  LAST 10s | SUCCESS {0:N0} | ERRORS {1:N0}' -f
+            $Snapshot.RecentSuccess, $Snapshot.RecentErrors) -ForegroundColor $color
+        if (!$Snapshot.RecentCompleted) { Write-Host '  No completed responses in the last 10s.' -ForegroundColor Yellow }
+    }
+    if ($Snapshot.UnexpectedErrors -or $Snapshot.Timeouts -or $VerbosePreference -eq 'Continue') {
+        Write-Host ('  Unexpected {0} | Timeouts {1} | Cancelled {2}' -f
+            $Snapshot.UnexpectedErrors, $Snapshot.Timeouts, $Snapshot.Cancellations)
+    }
+    foreach ($failure in ($Snapshot.FailureCounts.GetEnumerator() | Sort-Object Key)) {
+        Write-Host "  FAILURE $($failure.Value): $($failure.Key)" -ForegroundColor Red
+    }
     Write-Host ''
-    Write-Host ('  {0,-20} {1,-22} {2,-8} {3,8}' -f 'VERSION', 'INSTANCE', 'PROCESS', 'REQUESTS')
     $identities = @($Snapshot.Identities | Sort-Object Count -Descending)
+    $statusCodes = @($identities | ForEach-Object { $_.StatusCounts.Keys } | Sort-Object -Unique)
+    $tableHeader = '  {0,-20} {1,-22} {2,-8} {3,8}' -f 'VERSION', 'INSTANCE', 'PROCESS', 'REQUESTS'
+    foreach ($status in $statusCodes) { $tableHeader += ' {0,8}' -f "HTTP $status" }
+    Write-Host $tableHeader
     foreach ($identity in ($identities | Select-Object -First 8)) {
         $instance = if ($identity.Replica.StartsWith("$($identity.Revision)-")) {
             $identity.Replica.Substring($identity.Revision.Length + 1)
@@ -400,18 +481,22 @@ function Show-TrafficStatus {
         $shortVersion = if ($identity.Version.Length -gt 20) { $identity.Version.Substring(0, 17) + '...' } else { $identity.Version }
         $shortInstance = if ($instance.Length -gt 22) { '...' + $instance.Substring($instance.Length - 19) } else { $instance }
         $shortProcess = $identity.Process.Substring(0, [Math]::Min(8, $identity.Process.Length))
-        Write-Host ('  {0,-20} {1,-22} {2,-8} {3,8:N0}' -f
-            $shortVersion, $shortInstance, $shortProcess, $identity.Count)
+        $tableRow = '  {0,-20} {1,-22} {2,-8} {3,8:N0}' -f $shortVersion, $shortInstance, $shortProcess, $identity.Count
+        foreach ($status in $statusCodes) {
+            $statusCount = if ($identity.StatusCounts.ContainsKey([int]$status)) { $identity.StatusCounts[[int]$status] } else { 0 }
+            $tableRow += ' {0,8:N0}' -f $statusCount
+        }
+        $rowColor = if (@($identity.StatusCounts.Keys | Where-Object { $_ -ge 400 }).Count) { 'Red' } elseif (
+            @($identity.StatusCounts.Keys | Where-Object { $_ -ge 300 }).Count) { 'Yellow' } else { 'Green' }
+        Write-Host $tableRow -ForegroundColor $rowColor
     }
     if (!$identities.Count) { Write-Host '  Waiting for authenticated responses...' -ForegroundColor DarkGray }
     if ($identities.Count -gt 8) { Write-Host "  + $($identities.Count - 8) more process identities (see -Verbose / JSONL)" }
     if ($Snapshot.OtherIdentityCount) { Write-Host "  Additional requests beyond 256 identity limit: $($Snapshot.OtherIdentityCount)" -ForegroundColor Yellow }
     Write-Host ''
-    Write-Host '  Counts cumulative; latency uses last 2048 completions.' -ForegroundColor DarkGray
-    Write-Host '  Instances above have responded; this is not current replica readiness.' -ForegroundColor DarkGray
-    if ($Scenario -eq 'Release') {
-        Write-Host "  Expected regression: HTTP 503 from $CandidateVersion only." -ForegroundColor Yellow
-    }
+    Write-Verbose 'Counts cumulative; latency uses last 2048 completions.'
+    Write-Verbose 'Requests cancelled when stopping are not counted as errors.'
+    Write-Verbose 'Instances above have responded; this is not current replica readiness.'
     if ($Snapshot.StopReason) { Write-Host "  $($Snapshot.StopReason)" -ForegroundColor Red }
     Write-Host "  Updated $(Get-Date -Format HH:mm:ss) | Ctrl+C to stop" -ForegroundColor DarkGray
     foreach ($identity in $Snapshot.Identities) {
@@ -430,13 +515,13 @@ try {
         $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
         $writer.AutoFlush = $true
     }
-    $engine = [MusicStoreDemoTraffic.Engine]::new($ApplicationUrl.AbsoluteUri, $token, $RunId, $Scenario,
+    $engine = $engineType::new($ApplicationUrl.AbsoluteUri, $token, $RunId, $Scenario,
         $CandidateVersion, $Concurrency, $DurationSeconds, $MaxRequests, $TimeoutSeconds, $RequestsPerSecond, $writer)
     $token = $null
     Write-Verbose "GET $($ApplicationUrl.GetLeftPart([UriPartial]::Authority))/Store/Browse?genre=Rock scenario=$Scenario run=$RunId"
     Write-Verbose "Bounds: concurrency=$Concurrency duration=${DurationSeconds}s requests=$MaxRequests rate=$RequestsPerSecond/s timeout=${TimeoutSeconds}s; no retries, redirects, cookies, proxy, or Azure mutations."
     Write-Verbose 'HTTP/1.1 connections close after each request; a connection-attempt guard prevents hidden transport retries.'
-    Write-Host "Starting $Scenario traffic (bounded requests; no Azure resource changes)..."
+    Write-Host "Starting $Scenario traffic (Ctrl+C to stop; no Azure resource changes)..."
     $task = $engine.RunAsync()
     Show-TrafficStatus $engine.GetSnapshot()
     $nextStatus = [DateTime]::UtcNow.AddSeconds(5)
@@ -450,7 +535,11 @@ try {
     $summary = $task.GetAwaiter().GetResult()
     Show-TrafficStatus $summary -Finished
     if ($summary.StopReason) { throw $summary.StopReason }
-    if ($summary.UnexpectedErrors -gt 0) { throw "Traffic completed with $($summary.UnexpectedErrors) unexpected errors; inspect the status counts and JSONL results." }
+    if ($summary.UnexpectedErrors -gt 0) {
+        $failures = ($summary.FailureCounts.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Value)x $($_.Key)" }) -join '; '
+        $details = if ($OutputPath) { "Request details: $fullOutputPath" } else { 'Use -OutputPath with a new JSONL filename on the next run to retain per-request evidence.' }
+        throw "Traffic completed with $($summary.UnexpectedErrors) unexpected errors: $failures. $details"
+    }
     if ($summary.Success + $summary.ExpectedCandidate503 -eq 0) { throw 'No complete, authenticated demo response was received within the run bounds.' }
     if ($PassThru) { $summary }
 }
