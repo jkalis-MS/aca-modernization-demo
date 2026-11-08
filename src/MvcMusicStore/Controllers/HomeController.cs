@@ -3,15 +3,15 @@ using System.Linq;
 using System.Threading.Tasks;
 using MvcMusicStore.Models;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MvcMusicStore.Data;
 
 namespace MvcMusicStore.Controllers
 {
     public class HomeController : Controller
     {
-        private readonly MusicStoreEntities storeDB;
+        private readonly InMemoryDataStore storeDB;
 
-        public HomeController(MusicStoreEntities context)
+        public HomeController(InMemoryDataStore context)
         {
             storeDB = context;
         }
@@ -19,22 +19,22 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /Home/
 
-        public async Task<ActionResult> Index()
+        public ActionResult Index()
         {
             // Get most popular albums
-            var albums = await GetTopSellingAlbums(6);
+            var albums = GetTopSellingAlbums(6);
             return View(albums);
         }
 
 
-        private async Task<List<Album>> GetTopSellingAlbums(int count)
+        private List<Album> GetTopSellingAlbums(int count)
         {
             // Group the order details by album and return
             // the albums with the highest count
-            return await storeDB.Albums
+            return storeDB.GetAlbums()
                 .OrderByDescending(a => a.OrderDetails.Count())
                 .Take(count)
-                .ToListAsync();
+                .ToList();
         }
 
         public IActionResult Error()

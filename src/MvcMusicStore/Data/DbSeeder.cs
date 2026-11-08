@@ -2,94 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using MvcMusicStore.Models;
 
 namespace MvcMusicStore.Data;
 
 public static class DbSeeder
 {
-    public static async Task RecreateAndSeedAsync(MusicStoreEntities context, ILogger logger, string webRootPath = null)
-    {
-        try
-        {
-            logger.LogInformation("Dropping and recreating database...");
-            
-            // Delete the database
-            await context.Database.EnsureDeletedAsync();
-            logger.LogInformation("Database deleted successfully.");
-            
-            // Apply all migrations to recreate schema
-            await context.Database.MigrateAsync();
-            logger.LogInformation("Database recreated with migrations.");
-            
-            logger.LogInformation("Seeding database with sample data...");
-            await SeedDataAsync(context, webRootPath);
-            
-            logger.LogInformation("Database recreated and seeded successfully with 100 albums!");
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "An error occurred while recreating and seeding the database.");
-            throw;
-        }
-    }
-
-    public static async Task SeedAsync(MusicStoreEntities context, string webRootPath = null)
-    {
-        // Check if database already has data
-        if (await context.Albums.AnyAsync())
-        {
-            // Database has been seeded, but ensure album art files exist
-            if (!string.IsNullOrEmpty(webRootPath))
-            {
-                await EnsureAlbumArtAsync(context, webRootPath);
-            }
-            return;
-        }
-
-        await SeedDataAsync(context, webRootPath);
-    }
-
-    /// <summary>
-    /// Ensures album art PNG files exist on disk and updates any stale/placeholder URLs.
-    /// </summary>
-    private static async Task EnsureAlbumArtAsync(MusicStoreEntities context, string webRootPath)
-    {
-        var albums = await context.Albums.Include(a => a.Genre).ToListAsync();
-        var genreCounter = new Dictionary<int, int>();
-        bool changed = false;
-
-        foreach (var album in albums)
-        {
-            if (!genreCounter.TryGetValue(album.GenreId, out var count))
-                count = 0;
-            genreCounter[album.GenreId] = count + 1;
-
-            var fileName = $"album-{album.AlbumId}.png";
-            var expectedUrl = $"/Images/AlbumArt/{fileName}";
-            var filePath = Path.Combine(webRootPath, "Images", "AlbumArt", fileName);
-
-            // Regenerate if the file doesn't exist on disk or the URL still points to a placeholder
-            if (!File.Exists(filePath) || album.AlbumArtUrl != expectedUrl)
-            {
-                var genreName = album.Genre?.Name ?? "Rock";
-                AlbumArtGenerator.GenerateAlbumArt(filePath, genreName, count);
-
-                album.AlbumArtUrl = expectedUrl;
-                changed = true;
-            }
-        }
-
-        if (changed)
-        {
-            await context.SaveChangesAsync();
-        }
-    }
-
-    private static async Task SeedDataAsync(MusicStoreEntities context, string webRootPath)
+    public static void Seed(InMemoryDataStore store, string webRootPath = null)
     {
         var genres = new List<Genre>
         {
@@ -105,8 +24,10 @@ public static class DbSeeder
             new() { Name = "Classical" }
         };
 
-        await context.Genres.AddRangeAsync(genres);
-        await context.SaveChangesAsync();
+        for (var index = 0; index < genres.Count; index++)
+        {
+            genres[index].GenreId = index + 1;
+        }
 
         // Create fictitious artists
         var artists = new List<Artist>
@@ -168,20 +89,21 @@ public static class DbSeeder
             new() { Name = "The String Quartet" }
         };
 
-        await context.Artists.AddRangeAsync(artists);
-        await context.SaveChangesAsync();
+        for (var index = 0; index < artists.Count; index++)
+        {
+            artists[index].ArtistId = index + 1;
+        }
 
-        // Get genres with their IDs
-        var genreRock = await context.Genres.FirstAsync(g => g.Name == "Rock");
-        var genreJazz = await context.Genres.FirstAsync(g => g.Name == "Jazz");
-        var genreMetal = await context.Genres.FirstAsync(g => g.Name == "Metal");
-        var genreAlternative = await context.Genres.FirstAsync(g => g.Name == "Alternative");
-        var genreDisco = await context.Genres.FirstAsync(g => g.Name == "Disco");
-        var genreBlues = await context.Genres.FirstAsync(g => g.Name == "Blues");
-        var genreLatin = await context.Genres.FirstAsync(g => g.Name == "Latin");
-        var genreReggae = await context.Genres.FirstAsync(g => g.Name == "Reggae");
-        var genrePop = await context.Genres.FirstAsync(g => g.Name == "Pop");
-        var genreClassical = await context.Genres.FirstAsync(g => g.Name == "Classical");
+        var genreRock = genres.First(g => g.Name == "Rock");
+        var genreJazz = genres.First(g => g.Name == "Jazz");
+        var genreMetal = genres.First(g => g.Name == "Metal");
+        var genreAlternative = genres.First(g => g.Name == "Alternative");
+        var genreDisco = genres.First(g => g.Name == "Disco");
+        var genreBlues = genres.First(g => g.Name == "Blues");
+        var genreLatin = genres.First(g => g.Name == "Latin");
+        var genreReggae = genres.First(g => g.Name == "Reggae");
+        var genrePop = genres.First(g => g.Name == "Pop");
+        var genreClassical = genres.First(g => g.Name == "Classical");
 
         // Create 100 albums - 10 per genre
         var albums = new List<Album>
@@ -307,13 +229,16 @@ public static class DbSeeder
             new() { Title = "Virtuoso Performances", GenreId = genreClassical.GenreId, ArtistId = artists[54].ArtistId, Price = 14.99M, AlbumArtUrl = "/Content/Images/placeholder.svg" }
         };
 
-        await context.Albums.AddRangeAsync(albums);
-        await context.SaveChangesAsync();
+        for (var index = 0; index < albums.Count; index++)
+        {
+            albums[index].AlbumId = index + 1;
+            albums[index].AlbumArtUrl = $"/Images/AlbumArt/album-{index + 1}.png";
+        }
 
         // Generate album art PNGs if webRootPath is available
         if (!string.IsNullOrEmpty(webRootPath))
         {
-            var genreMap = await context.Genres.ToDictionaryAsync(g => g.GenreId, g => g.Name);
+            var genreMap = genres.ToDictionary(g => g.GenreId, g => g.Name);
             var genreCounter = new Dictionary<int, int>();
 
             foreach (var album in albums)
@@ -326,12 +251,13 @@ public static class DbSeeder
                 var fileName = $"album-{album.AlbumId}.png";
                 var filePath = Path.Combine(webRootPath, "Images", "AlbumArt", fileName);
 
-                AlbumArtGenerator.GenerateAlbumArt(filePath, genreName, count);
-
-                album.AlbumArtUrl = $"/Images/AlbumArt/{fileName}";
+                if (!File.Exists(filePath))
+                {
+                    AlbumArtGenerator.GenerateAlbumArt(filePath, genreName, count);
+                }
             }
-
-            await context.SaveChangesAsync();
         }
+
+        store.Initialize(genres, artists, albums);
     }
 }

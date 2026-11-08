@@ -1,7 +1,6 @@
 using System;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -49,13 +48,9 @@ builder.Services.AddControllersWithViews();
 // Register Key Vault Service
 builder.Services.AddSingleton<IKeyVaultService, KeyVaultService>();
 
-// Configure Entity Framework Core with SQL Server
-builder.Services.AddDbContext<MusicStoreEntities>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("MusicStoreEntities")));
-
-// Configure ASP.NET Core Identity
-builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+// Store and accounts are shared within this process and reset on restart.
+builder.Services.AddSingleton<InMemoryDataStore>();
+builder.Services.AddSingleton<InMemoryIdentityData>();
 
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
 {
@@ -73,8 +68,12 @@ builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
     // User settings
     options.User.RequireUniqueEmail = true;
 })
-.AddEntityFrameworkStores<ApplicationDbContext>()
+.AddUserStore<InMemoryUserStore>()
+.AddRoleStore<InMemoryRoleStore>()
 .AddDefaultTokenProviders();
+
+builder.Services.Configure<SecurityStampValidatorOptions>(options =>
+    options.ValidationInterval = TimeSpan.Zero);
 
 // Configure application cookie
 builder.Services.ConfigureApplicationCookie(options =>
@@ -117,60 +116,15 @@ app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}");
 
-// Auto-migrate and seed database on startup
+// Initialize the process-local catalog and optional administrator on startup.
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
     var logger = services.GetRequiredService<ILogger<Program>>();
-    
-    try
-    {
-        logger.LogInformation("Starting database initialization...");
-        
-        var context = services.GetRequiredService<MusicStoreEntities>();
-        var identityContext = services.GetRequiredService<ApplicationDbContext>();
-        
-        // Check if database recreation is enabled (useful during development)
-        var recreateDatabase = builder.Configuration.GetValue<bool>("Database:RecreateOnStartup", false);
-        
-        if (recreateDatabase)
-        {
-            logger.LogWarning("?? Database recreation is ENABLED. This will delete all existing data!");
-            
-            // Recreate main database
-            await DbSeeder.RecreateAndSeedAsync(context, logger, app.Environment.WebRootPath);
-            
-            // Recreate Identity database
-            logger.LogInformation("Recreating Identity database...");
-            await identityContext.Database.EnsureDeletedAsync();
-            await identityContext.Database.MigrateAsync();
-            logger.LogInformation("Identity database recreated.");
-        }
-        else
-        {
-            // Normal migration and seeding
-            logger.LogInformation("Running EF Core migrations for MusicStoreEntities...");
-            await context.Database.MigrateAsync();
-            
-            logger.LogInformation("Running EF Core migrations for Identity database...");
-            await identityContext.Database.MigrateAsync();
-            
-            logger.LogInformation("Database migrations completed successfully.");
-            
-            // Normal seeding (only if empty)
-            logger.LogInformation("Seeding database if needed...");
-            await DbSeeder.SeedAsync(context, app.Environment.WebRootPath);
-            logger.LogInformation("Database seeding completed.");
-        }
-        
-        logger.LogInformation("? Database initialization complete!");
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "An error occurred while initializing the database.");
-        // Don't throw - allow app to start even if migration fails
-        // This allows the app to serve requests and show meaningful errors
-    }
+
+    DbSeeder.Seed(services.GetRequiredService<InMemoryDataStore>(), app.Environment.WebRootPath);
+    await InMemoryIdentitySeeder.SeedAsync(services, builder.Configuration);
+    logger.LogInformation("In-memory store initialized. Changes and accounts are lost on restart.");
 }
 
 app.Run();

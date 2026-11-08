@@ -6,16 +6,16 @@ using MvcMusicStore.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc.Rendering;
-using Microsoft.EntityFrameworkCore;
+using MvcMusicStore.Data;
 
 namespace MvcMusicStore.Controllers
 {
     [Authorize(Roles = "Administrator")]
     public class StoreManagerController : Controller
     {
-        private readonly MusicStoreEntities db;
+        private readonly InMemoryDataStore db;
 
-        public StoreManagerController(MusicStoreEntities context)
+        public StoreManagerController(InMemoryDataStore context)
         {
             db = context;
         }
@@ -23,19 +23,19 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /StoreManager/
 
-        public async Task<ActionResult> Index()
+        public ActionResult Index()
         {
-            var albums = db.Albums.Include(a => a.Genre).Include(a => a.Artist)
+            var albums = db.GetAlbums()
                 .OrderBy(a => a.Price);
-            return View(await albums.ToListAsync());
+            return View(albums.ToList());
         }
 
         //
         // GET: /StoreManager/Details/5
 
-        public async Task<ActionResult> Details(int id = 0)
+        public ActionResult Details(int id = 0)
         {
-            Album album = await db.Albums.FindAsync(id);
+            Album album = db.GetAlbum(id);
             if (album == null)
             {
                 return NotFound();
@@ -46,10 +46,10 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /StoreManager/Create
 
-        public async Task<ActionResult> Create()
+        public ActionResult Create()
         {
-            ViewBag.GenreId = new SelectList(await db.Genres.ToListAsync(), "GenreId", "Name");
-            ViewBag.ArtistId = new SelectList(await db.Artists.ToListAsync(), "ArtistId", "Name");
+            ViewBag.GenreId = new SelectList(db.GetGenres(), "GenreId", "Name");
+            ViewBag.ArtistId = new SelectList(db.GetArtists(), "ArtistId", "Name");
             return View();
         }
 
@@ -58,32 +58,32 @@ namespace MvcMusicStore.Controllers
 
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public async Task<ActionResult> Create(Album album)
+        public ActionResult Create(Album album)
         {
+            ValidateReferences(album);
             if (ModelState.IsValid)
             {
-                db.Albums.Add(album);
-                await db.SaveChangesAsync();
+                db.AddAlbum(album);
                 return RedirectToAction("Index");
             }
 
-            ViewBag.GenreId = new SelectList(await db.Genres.ToListAsync(), "GenreId", "Name", album.GenreId);
-            ViewBag.ArtistId = new SelectList(await db.Artists.ToListAsync(), "ArtistId", "Name", album.ArtistId);
+            ViewBag.GenreId = new SelectList(db.GetGenres(), "GenreId", "Name", album.GenreId);
+            ViewBag.ArtistId = new SelectList(db.GetArtists(), "ArtistId", "Name", album.ArtistId);
             return View(album);
         }
 
         //
         // GET: /StoreManager/Edit/5
 
-        public async Task<ActionResult> Edit(int id = 0)
+        public ActionResult Edit(int id = 0)
         {
-            Album album = await db.Albums.FindAsync(id);
+            Album album = db.GetAlbum(id);
             if (album == null)
             {
                 return NotFound();
             }
-            ViewBag.GenreId = new SelectList(await db.Genres.ToListAsync(), "GenreId", "Name", album.GenreId);
-            ViewBag.ArtistId = new SelectList(await db.Artists.ToListAsync(), "ArtistId", "Name", album.ArtistId);
+            ViewBag.GenreId = new SelectList(db.GetGenres(), "GenreId", "Name", album.GenreId);
+            ViewBag.ArtistId = new SelectList(db.GetArtists(), "ArtistId", "Name", album.ArtistId);
             return View(album);
         }
 
@@ -92,25 +92,28 @@ namespace MvcMusicStore.Controllers
 
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public async Task<ActionResult> Edit(Album album)
+        public ActionResult Edit(Album album)
         {
+            ValidateReferences(album);
             if (ModelState.IsValid)
             {
-                db.Entry(album).State = EntityState.Modified;
-                await db.SaveChangesAsync();
+                if (!db.UpdateAlbum(album))
+                {
+                    return NotFound();
+                }
                 return RedirectToAction("Index");
             }
-            ViewBag.GenreId = new SelectList(await db.Genres.ToListAsync(), "GenreId", "Name", album.GenreId);
-            ViewBag.ArtistId = new SelectList(await db.Artists.ToListAsync(), "ArtistId", "Name", album.ArtistId);
+            ViewBag.GenreId = new SelectList(db.GetGenres(), "GenreId", "Name", album.GenreId);
+            ViewBag.ArtistId = new SelectList(db.GetArtists(), "ArtistId", "Name", album.ArtistId);
             return View(album);
         }
 
         //
         // GET: /StoreManager/Delete/5
 
-        public async Task<ActionResult> Delete(int id = 0)
+        public ActionResult Delete(int id = 0)
         {
-            Album album = await db.Albums.FindAsync(id);
+            Album album = db.GetAlbum(id);
             if (album == null)
             {
                 return NotFound();
@@ -123,12 +126,33 @@ namespace MvcMusicStore.Controllers
 
         [HttpPost, ActionName("Delete")]
         [ValidateAntiForgeryToken]
-        public async Task<ActionResult> DeleteConfirmed(int id)
+        public ActionResult DeleteConfirmed(int id)
         {
-            Album album = await db.Albums.FindAsync(id);
-            db.Albums.Remove(album);
-            await db.SaveChangesAsync();
+            try
+            {
+                if (!db.DeleteAlbum(id))
+                {
+                    return NotFound();
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                ModelState.AddModelError("", ex.Message);
+                return View("Delete", db.GetAlbum(id));
+            }
             return RedirectToAction("Index");
+        }
+
+        private void ValidateReferences(Album album)
+        {
+            if (!db.GetGenres().Any(g => g.GenreId == album.GenreId))
+            {
+                ModelState.AddModelError(nameof(album.GenreId), "Select an existing genre.");
+            }
+            if (!db.GetArtists().Any(a => a.ArtistId == album.ArtistId))
+            {
+                ModelState.AddModelError(nameof(album.ArtistId), "Select an existing artist.");
+            }
         }
     }
 }
