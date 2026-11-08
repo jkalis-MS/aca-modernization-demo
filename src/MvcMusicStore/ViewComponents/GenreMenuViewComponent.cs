@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MvcMusicStore.Data;
 using MvcMusicStore.Models;
 using System.Linq;
 using System.Threading.Tasks;
@@ -8,19 +8,19 @@ namespace MvcMusicStore.ViewComponents
 {
     public class GenreMenuViewComponent : ViewComponent
     {
-        private readonly MusicStoreEntities _context;
+        private readonly InMemoryDataStore _context;
 
-        public GenreMenuViewComponent(MusicStoreEntities context)
+        public GenreMenuViewComponent(InMemoryDataStore context)
         {
             _context = context;
         }
 
-        public async Task<IViewComponentResult> InvokeAsync()
+        public IViewComponentResult Invoke()
         {
-            var genres = await _context.Genres
+            var genres = _context.GetGenres()
                 .OrderBy(g => g.Name)
                 .Take(9)
-                .ToListAsync();
+                .ToList();
 
             return View(genres);
         }

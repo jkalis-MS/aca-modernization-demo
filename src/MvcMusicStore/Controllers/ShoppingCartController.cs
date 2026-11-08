@@ -3,15 +3,15 @@ using System.Threading.Tasks;
 using MvcMusicStore.Models;
 using MvcMusicStore.ViewModels;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MvcMusicStore.Data;
 
 namespace MvcMusicStore.Controllers
 {
     public class ShoppingCartController : Controller
     {
-        private readonly MusicStoreEntities storeDB;
+        private readonly InMemoryDataStore storeDB;
 
-        public ShoppingCartController(MusicStoreEntities context)
+        public ShoppingCartController(InMemoryDataStore context)
         {
             storeDB = context;
         }
@@ -37,11 +37,14 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /ShoppingCart/AddToCart/5
 
-        public async Task<ActionResult> AddToCart(int id)
+        public ActionResult AddToCart(int id)
         {
-            // Retrieve the album from the database
-            var addedAlbum = await storeDB.Albums
-                .SingleAsync(album => album.AlbumId == id);
+            // Retrieve the album from the store
+            var addedAlbum = storeDB.GetAlbum(id);
+            if (addedAlbum == null)
+            {
+                return NotFound();
+            }
 
             // Add it to the shopping cart
             var cart = ShoppingCart.GetCart(storeDB, this.HttpContext);
@@ -55,15 +58,17 @@ namespace MvcMusicStore.Controllers
         // AJAX: /ShoppingCart/RemoveFromCart/5
 
         [HttpPost]
-        public async Task<ActionResult> RemoveFromCart(int id)
+        public ActionResult RemoveFromCart(int id)
         {
             // Retrieve the current user's shopping cart
             var cart = ShoppingCart.GetCart(storeDB, this.HttpContext);
 
             // Get the name of the album to display confirmation
-            var cartItem = await storeDB.Carts
-                .Include(c => c.Album)
-                .SingleAsync(item => item.RecordId == id);
+            var cartItem = cart.GetCartItems().SingleOrDefault(item => item.RecordId == id);
+            if (cartItem == null)
+            {
+                return NotFound();
+            }
             string albumName = cartItem.Album.Title;
 
             // Remove from cart

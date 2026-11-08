@@ -3,6 +3,8 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
+using MvcMusicStore.Data;
 using MvcMusicStore.Models;
 
 namespace MvcMusicStore.Controllers
@@ -12,13 +14,16 @@ namespace MvcMusicStore.Controllers
     {
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly SignInManager<ApplicationUser> _signInManager;
+        private readonly InMemoryDataStore _store;
 
         public AccountController(
             UserManager<ApplicationUser> userManager,
-            SignInManager<ApplicationUser> signInManager)
+            SignInManager<ApplicationUser> signInManager,
+            InMemoryDataStore store)
         {
             _userManager = userManager;
             _signInManager = signInManager;
+            _store = store;
         }
 
         //
@@ -47,6 +52,8 @@ namespace MvcMusicStore.Controllers
             var result = await _signInManager.PasswordSignInAsync(model.UserName, model.Password, model.RememberMe, lockoutOnFailure: false);
             if (result.Succeeded)
             {
+                var user = await _userManager.FindByNameAsync(model.UserName);
+                MigrateCart(user.UserName);
                 return RedirectToLocal(returnUrl);
             }
             else
@@ -80,12 +87,7 @@ namespace MvcMusicStore.Controllers
                     await _signInManager.SignInAsync(user, isPersistent: false);
                     
                     // Migrate the shopping cart
-                    var db = HttpContext.RequestServices.GetService(typeof(MusicStoreEntities)) as MusicStoreEntities;
-                    if (db != null)
-                    {
-                        var cart = ShoppingCart.GetCart(db, this.HttpContext);
-                        cart.MigrateCart(model.UserName);
-                    }
+                    MigrateCart(user.UserName);
 
                     return RedirectToAction("Index", "Home");
                 }
@@ -166,6 +168,7 @@ namespace MvcMusicStore.Controllers
         public async Task<ActionResult> LogOff()
         {
             await _signInManager.SignOutAsync();
+            HttpContext.Session.Remove(ShoppingCart.CartSessionKey);
             return RedirectToAction("Index", "Home");
         }
 
@@ -179,6 +182,13 @@ namespace MvcMusicStore.Controllers
         }
 
         #region Helpers
+        private void MigrateCart(string userName)
+        {
+            var cart = ShoppingCart.GetCart(_store, HttpContext);
+            cart.MigrateCart(userName);
+            HttpContext.Session.SetString(ShoppingCart.CartSessionKey, userName);
+        }
+
         private void AddErrors(IdentityResult result)
         {
             foreach (var error in result.Errors)

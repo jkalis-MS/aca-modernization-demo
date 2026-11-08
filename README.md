@@ -1,5 +1,19 @@
 # From "Maybe Next Quarter" to Done Before Lunch: Modernizing a Legacy .NET App with GitHub App Modernization
 
+## `modernized.cached`: SQL-free application
+
+This branch uses a DI-managed singleton `InMemoryDataStore` for albums, genres, artists, carts, and orders. ASP.NET Core Identity uses separate singleton in-memory backing storage, retaining password hashing, security stamps, and role-based authorization. No EF Core provider, SQL connection string, or database migration is required by the application.
+
+- Run locally with `dotnet run --project src/MvcMusicStore/MvcMusicStore.csproj --no-launch-profile`. The existing 100-album catalog is seeded at startup.
+- Accounts, carts, orders, and catalog edits are **lost when the process restarts**. Each application instance has independent data; this is a demo configuration, not durable production storage.
+- Existing database accounts are not imported. Register an account to check out. Logging in merges an anonymous cart into that account's cart.
+- To enable store administration, supply both `InMemoryStore:AdminUserName` (an email address) and `InMemoryStore:AdminPassword` through user secrets or environment variables (`InMemoryStore__AdminUserName` and `InMemoryStore__AdminPassword`). The password must meet the existing Identity policy. There are no default administrator credentials.
+- Local `src/MvcMusicStore/docker-compose.yml` runs the web container alone, with no SQL container or database volume.
+- Run the package-free behavioral checks with `dotnet run --project tests/MvcMusicStore.Validation/MvcMusicStore.Validation.csproj`. With the app running on port 5087, run `pwsh -File tests/MvcMusicStore.Validation/SmokeTests.ps1` for HTTP checks of browsing, registration, cart migration, checkout, order ownership, logout, and login. These scripts create temporary process-local accounts and orders.
+- Azure provisioning templates in `src/infra` are unchanged and still provision SQL resources. Updating those templates or deleting existing cloud resources is separate work; SQL settings injected by them are now unused by the app.
+
+The remainder of this document describes the earlier SQL-backed modernization.
+
 ---
 
 In early 2025, we wanted to modernize Jon Galloway's [MVC Music Store](https://github.com/jongalloway/MvcMusicStore) — a classic ASP.NET MVC 5 app running on .NET Framework 4.8 with Entity Framework 6. The goal was straightforward: move to modern .NET, enable managed identity, and deploy to Azure Container Apps. No more plaintext connection strings. No more passwords in config files.

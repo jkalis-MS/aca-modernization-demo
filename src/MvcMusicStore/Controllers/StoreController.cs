@@ -4,15 +4,15 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using MvcMusicStore.Data;
 
 namespace MvcMusicStore.Controllers
 {
     public class StoreController : Controller
     {
-        private readonly MusicStoreEntities storeDB;
+        private readonly InMemoryDataStore storeDB;
 
-        public StoreController(MusicStoreEntities context)
+        public StoreController(InMemoryDataStore context)
         {
             storeDB = context;
         }
@@ -20,9 +20,9 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /Store/
 
-        public async Task<ActionResult> Index()
+        public ActionResult Index()
         {
-            var genres = await storeDB.Genres.ToListAsync();
+            var genres = storeDB.GetGenres();
             return View(genres);
         }
 
@@ -30,22 +30,22 @@ namespace MvcMusicStore.Controllers
         //
         // GET: /Store/Browse?genre=Disco
 
-        public async Task<ActionResult> Browse(string genre)
+        public ActionResult Browse(string genre)
         {
-            // Retrieve Genre and its Associated Albums from database
-            var genreModel = await storeDB.Genres
-                .Include(g => g.Albums)
-                .SingleAsync(g => g.Name == genre);
+            // Retrieve Genre and its Associated Albums from the store
+            var genreModel = storeDB.GetGenres().SingleOrDefault(g => g.Name == genre);
+
+            if (genreModel == null)
+            {
+                return NotFound();
+            }
 
             return View(genreModel);
         }
 
-        public async Task<ActionResult> Details(int id) 
+        public ActionResult Details(int id)
         {
-            var album = await storeDB.Albums
-                .Include(a => a.Genre)
-                .Include(a => a.Artist)
-                .FirstOrDefaultAsync(a => a.AlbumId == id);
+            var album = storeDB.GetAlbum(id);
             
             if (album == null)
             {
@@ -56,15 +56,15 @@ namespace MvcMusicStore.Controllers
         }
 
         // Converted from ChildAction to regular action - can be called via AJAX or as partial view
-        public async Task<ActionResult> GenreMenu()
+        public ActionResult GenreMenu()
         {
-            var genres = await storeDB.Genres
+            var genres = storeDB.GetGenres()
                 .OrderByDescending(
                     g => g.Albums.Sum(
                     a => a.OrderDetails.Sum(
                     od => od.Quantity)))
                 .Take(9)
-                .ToListAsync();
+                .ToList();
 
             return PartialView(genres);
         }
