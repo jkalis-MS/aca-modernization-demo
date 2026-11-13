@@ -16,6 +16,449 @@ Fast-forward one year. The full modernization agent shipped. I sat down with the
 
 Here's how it went.
 
+## Deploy this checkout
+
+The repeatable Bicep deployment workflow for this checkout is
+`scripts\Deploy-MusicStore.ps1`. The `azd up` discussion below describes the
+original modernization experience; use this workflow for the deployment planned
+in [DEPLOYMENT_PLAN.md](DEPLOYMENT_PLAN.md).
+
+Prerequisites: PowerShell 7 on Windows, Azure CLI with Bicep, and an interactive `az login`
+in the target tenant. The operator needs permission to create resource groups,
+resources, and role assignments, and to read their own Entra user profile. The
+operator becomes the SQL server's Entra administrator for database bootstrap.
+Docker is not required: ACR Tasks builds the Linux image.
+
+Before running commands, copy the shareable `config\azure.example.json` to the
+ignored `config\azure.local.json` and fill in your operator-selected subscription,
+tenant, resource group, region, and resource/demo references. Never put secret
+values in JSON: demo token settings are Key Vault references only.
+
+From the repository root:
+
+```powershell
+# Read-only validation and what-if; does not create resources.
+.\scripts\Deploy-MusicStore.ps1 -PreviewOnly
+
+# Validate, preview, provision, build, bootstrap SQL, deploy, and check readiness.
+.\scripts\Deploy-MusicStore.ps1
+```
+
+`scripts\Get-AzureLocalConfig.ps1` returns the parsed configuration object.
+Its optional `-ConfigPath` defaults to `config\azure.local.json` at the repository
+root. It always validates `schemaVersion` 1 and a subscription GUID, makes no
+Azure calls, and never falls back to the account's default subscription.
+`-RequiredSettings` accepts a `string[]` of dotted paths, including
+`deployment.subscriptionId`, `deployment.tenantId`,
+`deployment.resourceGroupName`, `deployment.location`,
+`deployment.environmentName`, `resources.containerAppName`,
+`resources.applicationUrl`, `resources.registryName`,
+`resources.registryEndpoint`, `resources.keyVaultName`,
+`demo.healthyRevision`, `demo.candidateRevision`, `demo.candidateVersion`,
+`demo.tokenSecretName`, and `demo.tokenSecretVersion`.
+
+`Deploy-MusicStore.ps1` and `Watch-Demo.ps1` automatically load local configuration;
+explicit script arguments override corresponding settings, but a valid local
+configuration subscription is always required, even with explicit overrides.
+Watch uses `-ResourceGroup` and `-AppName` for resource overrides.
+All deployed resources are in
+the configured group. `src\infra\subscription.bicep` creates the group and invokes
+`src\infra\main.bicep`. The new Container Apps environment contains only the
+Consumption workload profile, and the app explicitly selects it.
+
+The script uses an HTTPS public-IP lookup for a single-address SQL deployment
+firewall rule. Supply `-DeploymentClientIp <IPv4>` if automatic detection does
+not match the deployment workstation's SQL egress address. Every Azure CLI
+operation explicitly targets the requested subscription; the global default is
+not changed.
+
+Infrastructure is provisioned first, without a placeholder app. The script then
+builds and pushes an image tagged with a deployment timestamp, pins the deployment
+to its immutable image digest, creates a contained
+Entra user for the app's managed identity in both databases, and deploys the
+actual image through Bicep. Use `-ImageTag <unique-tag>` to select a tag; to resume
+with an existing image, use `-SkipImageBuild -ImageTag <existing-tag>`.
+Deployment waits for the expected image's revision to be healthy and own 100%
+of traffic before checking the public readiness endpoint.
+The SQL data-plane grants use the operator's short-lived Entra token, never a
+stored SQL password. The app receives database-scoped reader, writer, and DDL
+permissions for its startup migrations, not SQL server administrator access.
+
+The app starts in Production with database recreation explicitly disabled,
+applies migrations, and seeds only an empty catalog. Startup fails visibly if
+initialization fails. `/health/live` checks the process and `/health/ready` checks
+both database schemas and the seeded catalog.
+
+Deployment automatically saves returned resource identifiers, including
+`resources.applicationUrl`, to ignored local configuration without credentials.
+For a parallel regional deployment, use a separate ignored profile at
+`config\deployments\<profile>\azure.local.json` and pass `-ConfigPath` to the
+deployment, traffic, WATCH, smoke-test, and regression scripts. Keep that
+profile's firewall recovery snapshot beside its configuration. Do not copy
+old resource names, revisions, or secret references into the new profile.
+See [the parallel deployment procedure](DEPLOYMENT_PLAN.md#parallel-deployment-to-another-region)
+before switching the active root configuration; restart presenter terminals
+after switching targets.
+If only ACA changes region, use the
+[ACA-only relocation procedure](DEPLOYMENT_PLAN.md#move-only-container-apps-to-another-region)
+instead: SQL and the other dependencies keep their existing names and data.
+After your first deployment, those outputs are captured locally; run the HTTP
+workflow smoke test:
+
+```powershell
+.\scripts\Test-MusicStore.ps1
+```
+
+This checks browsing, registration, sign-out/sign-in, cart, and checkout. Each
+run leaves a synthetic `@example.com` account and order in the demo database;
+it does not use real customer information or print the generated password.
+`Test-MusicStore.ps1` and `Invoke-DemoTraffic.ps1` automatically load the configured
+application URL unless `-ApplicationUrl` is supplied. Loading the configured URL
+requires a valid configured subscription. An explicit URL bypasses configuration
+loading, allowing local/mock tests without a config file or deliberate invocation
+against another target.
+
+Deployment tradeoffs:
+
+- Public HTTPS ingress and authenticated public SQL/Key Vault endpoints are
+  intended for this demo, not a private-network production deployment. The SQL
+  firewall allows Azure services broadly and the deployment client's IPv4 address.
+- The app stays at one replica because sessions are in memory and data-protection
+  keys are not externalized. Sessions and sign-in cookies can be lost on restart
+  or redeployment. The optional operational demo below uses multiple replicas
+  for anonymous catalog requests only; it does not make cart/login workflows
+  horizontally scale-ready.
+- Consumption does not mean free: the app runs continuously at 0.5 vCPU / 1 GiB.
+  ACR Basic, two SQL Basic databases, and monitoring also incur charges.
+- Key Vault uses read-only app RBAC, soft delete, and purge protection. SQL is
+  Entra-only, ACR admin credentials are disabled, and managed identity is used for
+  runtime access.
+- Both Bicep-provided SQL connection strings use
+  `Pooling=True;Load Balance Timeout=30;` for all scenarios, not only the incident.
+  Connections remain pooled, but connections older than 30 seconds are discarded
+  when returned to the pool. This does not interrupt active queries or change
+  EF retry, SQL command timeout, or probe settings. See
+  [SqlClient connection lifetime](https://learn.microsoft.com/dotnet/api/microsoft.data.sqlclient.sqlconnectionstringbuilder.loadbalancetimeout).
+- The existing dependency set still emits a moderate-severity advisory for
+  `OpenTelemetry.Api` 1.12.0 (GHSA-g94r-2vxg-569j), and the login view emits an
+  MVC1000 synchronous-partial warning. Deployment does not resolve those
+  pre-existing warnings; review them before using this demo in production.
+
+### Operational demo preparation
+
+Follow [the presenter runbook](PRESENTER_RUNBOOK.md) for the three live scenarios.
+Every command block identifies its terminal: CONTROL, TRAFFIC, or WATCH.
+Keep machine-specific paths and presenter edits in the ignored
+`config\PRESENTER_RUNBOOK.local.md` copy; the shared runbook is a portable template.
+
+Prepare healthy and candidate images in an isolated Consumption environment in
+your selected region. Keep public traffic pinned to the healthy revision and
+stage the candidate at 0% traffic. Update demo revision/version references locally
+whenever staging changes them. Record revision names, baked versions, and image
+references only in local configuration, not in this README.
+
+A suggested setup uses 0.5 vCPU / 1 GiB per replica, HTTP concurrency target 5,
+two to four healthy replicas, and one candidate replica with the same SQL
+databases. Warm replicas incur ongoing charges even without demo requests.
+Use native `az` commands for builds and staging; the traffic generator and WATCH
+do not change resources. The optional SQL firewall fault script below deliberately
+changes the demo SQL server's Azure-services allowance.
+
+Use the same SQL connection settings on both healthy and candidate revisions:
+`Pooling=True;Load Balance Timeout=30;` on both database connection strings.
+These settings are unconditional in Bicep. Existing revisions need a configuration
+rollout; rebuilding an image or copying an old revision template alone does not
+apply the updated connection strings. No application-code change is required.
+
+Demo operations are disabled by default. Enabling them requires both
+`Demo__Enabled=true` and `Demo__IsolatedEnvironment=true`, plus a random
+32-256-character `Demo__Token`. Configure the app to reference a versioned Key
+Vault secret using managed identity. Scope the operator's Secrets Officer
+assignment only to that demo secret.
+Never print the token, commit it, include it in a URL, or pass it as a script
+argument.
+
+Only authenticated synthetic GET requests to `/Store/Browse?genre=Rock` change
+behavior: `scale` adds a fixed cancellable 500 ms asynchronous delay before the
+normal SQL/MVC action; `release-check` returns an intentional 503 in the candidate
+image only; `demo` combines that same scaling delay and candidate regression in
+every request; `observe` executes normal browsing. Ordinary requests and probes are
+unchanged. Missing/invalid tokens receive 403; disabled operations receive 404.
+Authorized responses include version, revision, replica, process UUID/start
+time, request trace ID, and active synthetic-request count. The same identities
+and run IDs appear in structured logs/traces. There is no HTTP crash endpoint.
+
+PowerShell 7.4+ controls **requests and observation only**:
+
+```powershell
+$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true
+$Config = .\scripts\Get-AzureLocalConfig.ps1 -RequiredSettings deployment.resourceGroupName,resources.containerAppName,demo.healthyRevision
+$Subscription = $Config.deployment.subscriptionId
+$ResourceGroup = $Config.deployment.resourceGroupName
+$App = $Config.resources.containerAppName
+$V1 = $Config.demo.healthyRevision
+$V2 = $Config.demo.candidateRevision
+
+# Validate the additional references needed for native Azure CLI commands.
+$Config = .\scripts\Get-AzureLocalConfig.ps1 -RequiredSettings resources.keyVaultName,demo.tokenSecretName,demo.tokenSecretVersion,resources.registryName,resources.registryEndpoint
+
+# Capture the secret into this terminal only; this does not print its value.
+$env:MUSICSTORE_DEMO_TOKEN = az keyvault secret show `
+    --subscription $Subscription --vault-name $Config.resources.keyVaultName `
+    --name $Config.demo.tokenSecretName --version $Config.demo.tokenSecretVersion `
+    --query value --output tsv
+
+# Run in a separate terminal; a compact status screen refreshes in place.
+.\scripts\Watch-Demo.ps1
+
+# Start once for scaling, candidate exposure, and rollback; Ctrl+C stops it.
+.\scripts\Invoke-DemoTraffic.ps1
+
+Remove-Item Env:\MUSICSTORE_DEMO_TOKEN
+```
+
+The default combined demo and standalone Release use `demo.candidateVersion`
+unless an explicit `-CandidateVersion` is
+supplied. Set it to the baked candidate version, not the revision name.
+Start default traffic once at healthy 100% and leave that exact same process
+running through scaling, candidate exposure, and rollback. No `-Scenario` argument
+or traffic restart is needed. After candidate or unexpected errors first appear, `LAST 10s` shows
+recent successes/errors, so errors visibly subside after rollback
+without restarting TRAFFIC. Totals and responding identities remain cumulative;
+past failures are never erased. No recent responses is not a successful rollback.
+Continued load can keep the extra replicas warm; stop traffic after rollback to
+demonstrate natural scale-in.
+
+When setting up or upgrading a deployment, the combined `demo` operation requires
+both images built from the updated application code. Older images supporting only
+`scale`, `release-check`, and `observe` reject it; updating PowerShell alone does
+not update the live app. Stage and rehearse both revisions offstage.
+Explicit `-Scenario Scale`, `Release`, and `Recovery` remain available for isolated
+checks and backwards compatibility; they are not required for the combined demo.
+
+The request generator never changes Azure resources or crashes a container.
+Engine types are cached by source hash, so script updates take effect on the
+next invocation even in a PowerShell session that loaded an older engine.
+It refreshes a compact traffic screen with concurrency, average completion rate,
+and explicit error counts in a three-column ASCII grid with borders between
+rows, followed by up to eight responding process identities. Failure details
+appear inside the grid. Each replica/process row has cumulative counts in
+dynamically added HTTP-status columns (for example `HTTP 200` and `HTTP 503`).
+Nonzero success counts are green and nonzero error counts are red; labels,
+identity fields, request totals, and zero-error cells keep the normal terminal color.
+The presenter table omits process IDs; they remain available in verbose output,
+structured summaries, and JSONL diagnostics.
+Responses without a verified replica identity remain in the overall diagnostics
+rather than being attributed to an invented replica. Scaling
+and default combined-demo latency are displayed only with `-Verbose`; standalone
+Release and Recovery retain visible latency.
+Latency measurements remain available in structured summaries and JSONL.
+These identity counts are cumulative, not a readiness inventory. Add `-Verbose`
+for full identities/bounds or `-NoClear` for scrolling snapshots. Structured
+summary objects are returned only with `-PassThru`; JSONL output is unchanged.
+Detailed unexpected-error/timeout/cancellation counters appear only on unexpected
+failures or with `-Verbose`. Candidate failures appear naturally in their row's
+`HTTP 503` column, without a separate regression explanation or candidate label.
+Explanatory footer notes are verbose-only, keeping the default presentation clean.
+Unexpected failures show counts by outcome, HTTP status (or no response), and
+transport exception type where available. Raw exception messages are not logged.
+Requests cancelled when stopping are separate from unexpected failures.
+The observer runs until Ctrl+C by default. Optional `-DurationSeconds` (1–1,800) bounds
+automated observation; each Azure CLI query still has its own timeout.
+By default it rediscovers all active revisions on every refresh, including those
+at 0% traffic, and groups replicas under revision headings with traffic weights
+and health. New revisions appear even before their first replica; replica
+additions, readiness changes, restarts, and revisions leaving the active set are
+highlighted without restarting WATCH. The summary totals span all displayed
+revisions. Use `-Revision <name>` to explicitly observe just one revision; the
+default no longer depends on `demo.healthyRevision`.
+It shows replica/ready/restart totals, stable revision-scoped replica labels, and
+the four most recent observed changes. `STARTING` means the web container
+is not ready; it is not a diagnosis. Add `-Verbose` for full Azure CLI commands
+and container IDs, or `-NoClear` for scrolling snapshots instead of a refreshing
+screen. Redirected output also uses snapshots. Labels identify replicas, not
+process lifetimes; container replacement is shown in recent changes even if the
+replica name stays the same.
+Traffic runs continuously until Ctrl+C by default, without a duration or total
+request cap. Default combined traffic and standalone Scale maintain 32 concurrent
+requests; standalone Release uses 4
+slots/up to 10 requests per second; Recovery uses 8 slots/up to 20 requests per
+second. Scale throughput depends on response time, not a fixed requests/second
+target. The default continuous run keeps going through timeouts, transport
+failures, and HTTP errors, even during a total outage, so it can show recovery
+without restarting. Ingress HTTP 408, 429, and 5xx responses without demo identity
+headers remain visible as HTTP errors, not authentication/setup failures or
+invented replica responses. Authentication rejection (401/403) and missing or
+invalid identity headers on other responses still stop traffic. Concurrency is
+capped at 64 and individual timeouts at 15 seconds.
+Optional `-DurationSeconds` (1–180) and `-MaxRequests` (1–15,000) bound automated
+runs; either can be supplied independently. These bounded verification runs retain
+the 2% unexpected-error safety stop after at least 50 completed requests and fail
+on unexpected errors or no complete authenticated responses. Ctrl+C cancels and
+drains owned requests. Optional
+`-RunId <slug> -OutputPath <new-file.jsonl>` saves identity/status/latency results
+without credentials; existing files are not overwritten. Percentiles use the
+latest 2,048 completions. Cookies, redirects, configured retries, and proxy use
+are disabled; each HTTP/1.1 connection closes after one request, with a
+connection-attempt guard to prevent hidden request replay. Continuous runs retain
+all failure counts without throwing solely because requests failed; bounded runs
+return a failure for unexpected errors. Candidate 503s are separately counted,
+not hidden.
+
+Use native Azure CLI for resource changes. For example, build new versions
+offstage, using new tags and baked version identifiers each time:
+
+```powershell
+$Context = Join-Path $PWD 'src\MvcMusicStore'
+$Dockerfile = Join-Path $Context 'Dockerfile'
+$BuildId = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
+$Version1 = "ops-v1-$BuildId"
+$Version2 = "ops-v2-$BuildId"
+az acr build --subscription $Subscription --registry $Config.resources.registryName `
+    --image "musicstore:$Version1" --file $Dockerfile --platform linux/amd64 `
+    --build-arg "DEMO_VERSION=$Version1" --build-arg DEMO_RELEASE_REGRESSION=false $Context
+az acr build --subscription $Subscription --registry $Config.resources.registryName `
+    --image "musicstore:$Version2" --file $Dockerfile --platform linux/amd64 `
+    --build-arg "DEMO_VERSION=$Version2" --build-arg DEMO_RELEASE_REGRESSION=true $Context
+
+# Existing named traffic must remain pinned before creating another revision.
+$Digest = az acr repository show --subscription $Subscription `
+    --name $Config.resources.registryName --image "musicstore:$Version2" --query digest -o tsv
+if ($Digest -notmatch '^sha256:[0-9a-f]{64}$') {
+    throw 'Candidate digest lookup failed.'
+}
+az containerapp revision copy --subscription $Subscription `
+    -g $ResourceGroup -n $App --from-revision $V1 --revision-suffix $Version2 `
+    --image "$($Config.resources.registryEndpoint)/musicstore@$Digest" `
+    --min-replicas 1 --max-replicas 1 --output none
+# Verify readiness and direct-revision browsing before changing public traffic.
+# Retire unused 0%-traffic revisions explicitly to avoid accumulating warm replicas.
+```
+
+Bicep supports `demoEnabled`, `demoIsolatedEnvironment`, `demoTokenSecretUri`,
+`demoMinReplicas`, `demoMaxReplicas`, `httpConcurrency`, `revisionMode`,
+`revisionSuffix`, `revisionTraffic`, and readiness period/timeout/failure threshold.
+Use explicit named `revisionTraffic` in Multiple mode, never `latestRevision`.
+The normal defaults remain Single mode/one replica/demo disabled. An enabled
+configuration without isolation confirmation and a valid token fails startup.
+Demo Bicep readiness defaults are a 5-second period, 3-second timeout, and
+2 failures; startup and liveness are unchanged. When using native CLI staging,
+configure the complete revision template, including probes; `revision copy`
+inherits those probes.
+
+`Deploy-MusicStore.ps1` refuses to overwrite Multiple-mode demo configuration.
+To intentionally end the demo, first stop all request generators, then run
+`.\scripts\Deploy-MusicStore.ps1 -ResetDemoConfiguration` to deploy a normal image
+in Single mode/one replica with demo behavior disabled. It preserves database
+data but replaces the demo revision/traffic configuration. The token secret and
+its scoped operator assignment remain until explicitly removed.
+
+Focused local checks (no Azure load or faults):
+
+```powershell
+dotnet run --project .\tests\DemoOperations.Tests -c Release
+dotnet run --project .\tests\DemoOperations.Tests -c Release -p:DemoReleaseRegression=true
+.\scripts\Test-DemoUtilities.ps1
+.\scripts\Test-AzureLocalConfig.ps1
+.\scripts\Test-SqlFirewallRegression.ps1
+```
+
+`Test-AzureLocalConfig.ps1` validates missing-configuration refusal without network
+access.
+
+### Scenario 3: mysterious regression and SRE Agent
+
+Follow Scenario 3 in [the presenter runbook](PRESENTER_RUNBOOK.md) to introduce
+the regression, investigate through Cascade's **Debug with SRE Agent**, and
+restore the recorded settings. Give the agent only the customer symptom; the
+technical cause below is presenter-only information.
+
+Use only in the isolated demo environment, with no other SQL consumers. After
+showing scale-in, start the same default TRAFFIC command again if it was stopped,
+then keep TRAFFIC and WATCH running through the outage and recovery. Browse the
+catalog normally as well. Both databases and all revisions using this SQL server
+can be affected.
+
+**Run in TERMINAL 1: CONTROL - PowerShell 7.4+, from the repository root.**
+
+```powershell
+.\scripts\Introduce-Misterious-Regression.ps1
+```
+
+Normal success output is a large cyan ASCII banner with a smiling intern and
+the message `Misterious regression introduced. Greetings from the Intern :)`.
+It fits an 80-column terminal and does not reveal the cause. Operator details,
+snapshot location, and recovery instructions are available with `-Verbose`
+offstage. Real errors still stop the script and remain visible.
+
+The script loads the subscription, resource group, and SQL server from the local
+Azure configuration. Before removing every server-level `0.0.0.0`–`0.0.0.0`
+[Azure-services rule](https://learn.microsoft.com/azure/azure-sql/database/firewall-configure?view=azuresql),
+it saves the firewall baseline to the ignored
+`config\sql-firewall-regression.local.json`. Public network access must already
+be enabled. Before opening SQL connections, the script detects the workstation's
+public IPv4 address over HTTPS and creates or updates the dedicated
+`Admin Access` rule to allow only that address. Other rules, including
+`DeploymentClient`, are preserved. `Admin Access` remains after restoration
+and is updated if the workstation changes networks. This needs SQL firewall
+write permissions; no configuration edit or redeployment is needed.
+Existing `PresenterLaptop` rules are not renamed or deleted automatically.
+After restoring any incident and verifying `Admin Access` works, remove the
+old rule if it is no longer needed.
+Propagation can take up to five minutes; if SQL access still fails, wait and
+rerun the same command. An outstanding snapshot blocks another
+fault so that the original baseline is never overwritten. `-WhatIf` previews
+without writing the snapshot or changing Azure.
+
+To shorten firewall-cache latency, the script executes
+[`DBCC FLUSHAUTHCACHE`](https://learn.microsoft.com/sql/t-sql/database-console-commands/dbcc-flushauthcache-transact-sql?view=azuresqldb-current)
+in every database listed in `resources.databaseNames` after removing the
+allowance and again after restoration. Your signed-in operator needs SQL
+administrator access or `KILL DATABASE CONNECTION` permission in those
+databases. Workstation firewall access is prepared automatically. No permissions are granted to the
+app. Before introduction, the script opens operator connections and checks
+permission in every database before removing the Azure-services rules. These short-lived
+operator connections are unpooled; application pooling is unchanged. Tokens
+stay in memory and are not passed as command-line arguments.
+
+The cache refresh does not kill existing sessions. A failed refresh is an
+explicit error, not a successful banner; the recovery snapshot remains.
+Restoration reinstates the saved allowance before attempting SQL access/cache
+refresh, so SQL access problems cannot prevent the firewall repair. A failed
+restore refresh keeps the snapshot so `-Restore` can retry.
+
+The script does **not** restart a revision or prove that the catalog has broken.
+Refreshing the database caches reduces the normal firewall-cache delay but does
+not guarantee immediate failure. With the shared 30-second
+connection lifetime applied, older connections are discarded when returned to
+the pool; existing connections and active queries are not forcibly interrupted.
+This rotation is not a guarantee of an outage within 30 seconds: firewall
+propagation and other server-level or database-level rules can still allow
+access. If a revision is restarted later to force fresh connections, SQL
+migration failure can prevent startup or cause restarts/unready replicas.
+Confirm the actual SQL firewall rejection in console logs before presenting the
+incident to the SRE Agent; do not assume every HTTP 503 is the firewall error.
+Do not redeploy Bicep during the incident: it recreates the Azure-services rule.
+
+**Run in TERMINAL 1: CONTROL - PowerShell to restore the saved allowance.**
+
+```powershell
+.\scripts\Introduce-Misterious-Regression.ps1 -Restore
+```
+
+Restoration recreates only the saved Azure-services rules under their original
+names. It refuses to overwrite a same-name rule whose addresses changed, and
+leaves other rules alone. A partial failure retains the snapshot for another
+restore attempt. After verification, the snapshot is removed so another
+rehearsal can capture a fresh baseline. Repeating `-Restore` without a snapshot
+checks the live configuration: if the Azure-services allowance is already
+enabled, it reports `Nothing to restore. Misterious regression is already reset.`
+without changing anything. If the allowance is disabled, it still refuses to
+guess the missing baseline; use the same checkout and `-ConfigPath` used to
+introduce the fault. Allow propagation and verify readiness and catalog recovery
+separately. With a custom `-ConfigPath`, the snapshot is
+saved beside that configuration; keep that directory private and untracked.
+
 ---
 
 ## Phase 1: Assessment

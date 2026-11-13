@@ -3,17 +3,23 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copy csproj and restore dependencies
-COPY ["MvcMusicStore.csproj", "MvcMusicStore/"]
+COPY ["MvcMusicStore.csproj", "NuGet.Config", "MvcMusicStore/"]
 RUN dotnet restore "MvcMusicStore/MvcMusicStore.csproj"
 
 # Copy everything else and build
 COPY . MvcMusicStore/
 WORKDIR "/src/MvcMusicStore"
-RUN dotnet build "MvcMusicStore.csproj" -c Release -o /app/build
+ARG DEMO_VERSION=development
+ARG DEMO_RELEASE_REGRESSION=false
+RUN dotnet build "MvcMusicStore.csproj" -c Release -o /app/build \
+    -p:DemoVersion="$DEMO_VERSION" -p:DemoReleaseRegression="$DEMO_RELEASE_REGRESSION"
 
 # Publish stage
 FROM build AS publish
-RUN dotnet publish "MvcMusicStore.csproj" -c Release -o /app/publish /p:UseAppHost=false
+ARG DEMO_VERSION=development
+ARG DEMO_RELEASE_REGRESSION=false
+RUN dotnet publish "MvcMusicStore.csproj" -c Release -o /app/publish /p:UseAppHost=false \
+    -p:DemoVersion="$DEMO_VERSION" -p:DemoReleaseRegression="$DEMO_RELEASE_REGRESSION"
 
 # Runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final

@@ -33,3 +33,9 @@ App_Data/
 Packages/
 .vs/
 .appmod/
+
+# Private deployment settings: never commit actual local configuration.
+/config/azure.local.json
+/config/PRESENTER_RUNBOOK.local.md
+/config/sql-firewall-regression.local.json
+/config/deployments/

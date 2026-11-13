@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "deployment": {
+    "subscriptionId": "",
+    "tenantId": "",
+    "resourceGroupName": "",
+    "location": "",
+    "containerAppLocation": "",
+    "environmentName": ""
+  },
+  "resources": {
+    "containerAppName": "",
+    "containerAppEnvironmentName": "",
+    "applicationUrl": "",
+    "registryName": "",
+    "registryEndpoint": "",
+    "sqlServerName": "",
+    "sqlServerEndpoint": "",
+    "databaseNames": [],
+    "keyVaultName": "",
+    "identityName": "",
+    "identityClientId": "",
+    "identityPrincipalId": "",
+    "logWorkspaceName": "",
+    "logWorkspaceId": "",
+    "applicationInsightsName": ""
+  },
+  "demo": {
+    "healthyRevision": "",
+    "candidateRevision": "",
+    "healthyVersion": "",
+    "candidateVersion": "",
+    "healthyImage": "",
+    "candidateImage": "",
+    "tokenSecretName": "",
+    "tokenSecretVersion": "",
+    "tokenSecretUri": ""
+  }
+}
