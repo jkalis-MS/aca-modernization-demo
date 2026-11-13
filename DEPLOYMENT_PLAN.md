@@ -125,3 +125,68 @@ Native `az` commands must always pass that subscription explicitly.
 See [README.md](README.md#deploy-this-checkout) for deployment commands,
 redeployment options, synthetic smoke-test data, networking/cost/session
 tradeoffs, and pre-existing build warnings.
+
+## Parallel deployment to another region
+
+Deploy a new resource group and a complete new regional stack; do not change the
+location of the existing resources. Resource names derive from the resource
+group and environment, so a new group produces new app, SQL server, registry,
+identity, and vault names. Read those names from Bicep outputs rather than
+substituting a region in existing names or URLs.
+
+Keep each deployment's configuration and any outstanding firewall recovery
+snapshot together under ignored `config\deployments\<profile>\`. Start the new
+profile from `config\azure.example.json`, not from a populated old profile that
+would retain stale demo revisions or secret references. Explicitly pass its
+`-ConfigPath` while provisioning and verifying; leave the active root
+`config\azure.local.json` unchanged until the new stack is ready.
+
+Use fresh seeded databases unless data migration is explicitly required. Import
+the verified healthy and candidate images by digest into the new registry,
+bootstrap the new managed identity's database users, and create a token in the
+new vault. Recreate both demo revisions, probes, scale rules, SQL connection
+rotation, and healthy-only traffic. A normal deployment-script invocation alone
+does not recreate the multiple-revision operational demo.
+
+Verify resource locations, Consumption assignment, catalog/readiness, both demo
+image identities, and candidate behavior before switching the active local
+configuration. Keep the old stack intact. Restart the three presenter terminals
+and reload the new token: already-running scripts and cached `$Config`, `$Azure`,
+`$Healthy`, and `$Candidate` variables do not follow a configuration-file change.
+Rehearse Cascade's SRE Agent access against the new app separately.
+
+### Move only Container Apps to another region
+
+When supporting services must stay in their original region, deploy
+`src\infra\container-app.bicep` directly at resource-group scope in **incremental**
+mode. This is the same module used by `main.bicep`; probes, identity selection,
+secrets, SQL connection rotation, and scale settings stay consistent.
+
+Supply new app/environment names and their target `location`, plus the existing
+identity, registry, vault, SQL server/databases, Log Analytics, and Application
+Insights names. Those dependencies must be in the deployment's resource group.
+The module declares them as existing references: it does not move, recreate,
+grant new permissions to, or reset them. Preview must create only the new app
+and environment. Do not deploy the full subscription template to perform this
+ACA-only relocation.
+`Deploy-MusicStore.ps1` refuses a split-region profile targeting the same resource
+group, even with `-ResetDemoConfiguration`, rather than accidentally redeploying
+the original regional app. A new full-stack deployment needs a separate profile
+or an explicitly different resource group.
+
+Keep `deployment.location` as the supporting-services region and record the
+ACA region in `deployment.containerAppLocation`. After verification, update only
+the app/environment/URL and demo revision references in the active configuration;
+the SQL server name, database data, image registry, identity, and secret reference
+remain unchanged. Existing images can be pulled across regions without imports.
+Keep the old app as a fallback until explicitly retired.
+When retiring it, delete only the explicitly selected old Container App. Keep
+the shared SQL, registry, vault, identity, monitoring, and resource group.
+Deleting the old environment is a separate decision. An archived local profile
+is a historical record after retirement, not a working fallback target.
+
+**Shared-dependency warning:** the old and new apps use the same databases,
+monitoring, and token. Scenario 3's SQL firewall change affects both apps;
+regional app separation does not isolate a shared SQL outage. Do not reseed or
+replace these existing databases when staging the new app. Cross-region SQL
+calls can also change latency, so rehearse the scaling and incident timing again.

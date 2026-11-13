@@ -5,6 +5,7 @@
     "tenantId": "",
     "resourceGroupName": "",
     "location": "",
+    "containerAppLocation": "",
     "environmentName": ""
   },
   "resources": {

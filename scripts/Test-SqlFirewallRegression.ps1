@@ -39,6 +39,12 @@ function Reset-Fixture {
         FailShow = $false
         IgnoreDelete = $false
         IgnoreCreate = $false
+        Connections = [System.Collections.Generic.List[object]]::new()
+        Flushes = [System.Collections.Generic.List[object]]::new()
+        DenyPermission = $false
+        FailOpenAt = 0
+        FailFlushAt = 0
+        FailToken = $false
     }
     foreach ($rule in @(
         @{ name = 'AzureAllowance-A'; startIpAddress = '0.0.0.0'; endIpAddress = '0.0.0.0' },
@@ -48,6 +54,51 @@ function Reset-Fixture {
     )) {
         $script:mock.Rules.Add([pscustomobject]$rule)
     }
+}
+
+function New-Object {
+    param([string]$TypeName, [string]$ArgumentList)
+    if ($TypeName -ne 'System.Data.SqlClient.SqlConnection') { throw 'Unexpected object creation.' }
+    $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new($ArgumentList)
+    if ($builder.DataSource -ne 'tcp:sql-test.database.windows.net,1433' -or
+        $builder.InitialCatalog -notin 'Catalog', 'Identity' -or !$builder.Encrypt -or
+        $builder.TrustServerCertificate -or $builder.Pooling) {
+        throw 'Unexpected SQL connection target or security settings.'
+    }
+    $connection = [pscustomobject]@{
+        Database = $builder.InitialCatalog
+        AccessToken = ''
+        Disposed = $false
+        Ordinal = $mock.Connections.Count + 1
+    }
+    $connection | Add-Member ScriptMethod Open {
+        if ($this.AccessToken -ne 'mock-sql-token') { throw 'Missing operator token.' }
+        if ($this.Ordinal -eq $mock.FailOpenAt) { throw 'Mock SQL open failure' }
+    }
+    $connection | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+    $connection | Add-Member ScriptMethod CreateCommand {
+        $command = [pscustomobject]@{ Database = $this.Database; CommandText = ''; CommandTimeout = 0 }
+        $command | Add-Member ScriptMethod ExecuteScalar {
+            if ($this.CommandText -ne "SELECT HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'KILL DATABASE CONNECTION');") {
+                throw 'Unexpected permission query.'
+            }
+            if ($mock.DenyPermission) { return 0 }
+            return 1
+        }
+        $command | Add-Member ScriptMethod ExecuteNonQuery {
+            if ($this.CommandText -ne 'DBCC FLUSHAUTHCACHE;' -or $this.CommandTimeout -ne 15) {
+                throw 'Unexpected SQL mutation or timeout.'
+            }
+            if (!(Test-Path -LiteralPath $snapshotPath)) { throw 'Cache refresh requires a recovery baseline.' }
+            $mock.Flushes.Add([pscustomobject]@{ Database = $this.Database; AllowancePresent = @($mock.Rules | Where-Object startIpAddress -EQ '0.0.0.0' | Where-Object endIpAddress -EQ '0.0.0.0').Count -gt 0 })
+            if ($mock.Flushes.Count -eq $mock.FailFlushAt) { throw 'Mock SQL refresh failure' }
+            return -1
+        }
+        $command | Add-Member ScriptMethod Dispose {}
+        return $command
+    }
+    $mock.Connections.Add($connection)
+    return $connection
 }
 
 function Get-Option {
@@ -64,9 +115,15 @@ function az {
     $mock.Calls.Add($command)
     foreach ($option in $arguments | Where-Object { $_ -like '--*' }) {
         if ($option -notin @('--subscription', '--resource-group', '--name', '--server', '--query',
-            '--output', '--only-show-errors', '--start-ip-address', '--end-ip-address')) {
+            '--output', '--only-show-errors', '--start-ip-address', '--end-ip-address', '--resource')) {
             throw "Unsupported mock CLI option: $option"
         }
+    }
+    if ($command.StartsWith('account get-access-token ')) {
+        if ((Get-Option $arguments '--subscription') -ne $subscription -or
+            (Get-Option $arguments '--resource') -ne 'https://database.windows.net/') { throw 'Wrong token target.' }
+        if ($mock.FailToken) { & pwsh -NoLogo -NoProfile -Command 'exit 17'; return }
+        return 'mock-sql-token'
     }
     if ((Get-Option $arguments '--subscription') -ne $subscription -or
         (Get-Option $arguments '--resource-group') -ne 'rg-test') {
@@ -75,7 +132,7 @@ function az {
     if ($command.StartsWith('sql server show ')) {
         if ((Get-Option $arguments '--name') -ne 'sql-test') { throw 'Wrong SQL server.' }
         if ($mock.FailShow) { & pwsh -NoLogo -NoProfile -Command 'exit 17'; return }
-        @{ id = $serverId; publicNetworkAccess = $mock.PublicAccess } | ConvertTo-Json
+        @{ id = $serverId; publicNetworkAccess = $mock.PublicAccess; fullyQualifiedDomainName = 'sql-test.database.windows.net' } | ConvertTo-Json
         return
     }
     if ((Get-Option $arguments '--server') -ne 'sql-test') { throw 'Wrong SQL server.' }
@@ -86,6 +143,9 @@ function az {
     if (!(Test-Path -LiteralPath $snapshotPath -PathType Leaf)) { throw 'Mutation attempted without a recovery snapshot.' }
     $name = Get-Option $arguments '--name'
     if ($command.StartsWith('sql server firewall-rule delete ')) {
+        if ($mock.Connections.Count -ne 2 -or @($mock.Connections | Where-Object Disposed).Count -ne 0) {
+            throw 'Both operator connections must be opened and retained before removing firewall access.'
+        }
         $mock.DeleteCount++
         if ($mock.DeleteCount -eq $mock.FailDeleteAt) { & pwsh -NoLogo -NoProfile -Command 'exit 17'; return }
         if (!$mock.IgnoreDelete) {
@@ -116,7 +176,7 @@ try {
     @{
         schemaVersion = 1
         deployment = @{ subscriptionId = $subscription; resourceGroupName = 'rg-test' }
-        resources = @{ sqlServerName = 'sql-test' }
+        resources = @{ sqlServerName = 'sql-test'; databaseNames = @('Catalog', 'Identity') }
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $configPath
 
     Reset-Fixture
@@ -129,6 +189,7 @@ try {
     & $faultScript -ConfigPath $configPath -WhatIf
     Assert-True (!(Test-Path -LiteralPath $snapshotPath)) 'WhatIf must not write a snapshot.'
     Assert-True ($mock.DeleteCount -eq 0 -and $mock.Rules.Count -eq 4) 'WhatIf must not change rules.'
+    Assert-True ($mock.Connections.Count -eq 0 -and $mock.Flushes.Count -eq 0) 'WhatIf must not connect to SQL or refresh caches.'
 
     $output = @(& $faultScript -ConfigPath $configPath *>&1)
     Assert-True ($output.Count -eq 1) 'Default introduction must output only the presenter banner, with no extra stream messages.'
@@ -143,16 +204,20 @@ try {
     Assert-True ($saved.schemaVersion -eq 1 -and $saved.serverId -eq $serverId) 'Snapshot must identify the original server.'
     Assert-True ($saved.publicNetworkAccess -eq 'Enabled' -and $saved.firewallRules.Count -eq 4) 'Snapshot must record all original firewall rules and public access.'
     Assert-True ($mock.DeleteCount -eq 2 -and $mock.Rules.Count -eq 2) 'Disable every exact Azure-services allowance, regardless of name.'
+    Assert-True ($mock.Flushes.Count -eq 2 -and @($mock.Flushes | Where-Object AllowancePresent).Count -eq 0) 'Refresh both user databases only after allowance removal.'
+    Assert-True (@($mock.Connections | Where-Object { !$_.Disposed }).Count -eq 0) 'Dispose all operator connections after introduction.'
     Assert-True (@($mock.Rules | Where-Object name -EQ 'Workstation').Count -eq 1) 'Preserve operator access.'
     Assert-True (@($mock.Rules | Where-Object name -EQ 'NotAnAzureAllowance').Count -eq 1) 'Require both start and end to equal 0.0.0.0.'
     Assert-Fails { & $faultScript -ConfigPath $configPath } 'already exists'
     Assert-True ((Get-Content -LiteralPath $snapshotPath -Raw) -ceq $savedJson) 'Repeated invocation must not overwrite the baseline.'
     & $faultScript -ConfigPath $configPath -Restore -WhatIf
     Assert-True ($mock.CreateCount -eq 0 -and (Test-Path -LiteralPath $snapshotPath)) 'Restore WhatIf must preserve both Azure state and the snapshot.'
+    Assert-True ($mock.Connections.Count -eq 2 -and $mock.Flushes.Count -eq 2) 'Restore WhatIf must not open additional SQL connections or refresh any caches.'
     $output = @(& $faultScript -ConfigPath $configPath -Restore *>&1)
     Assert-True ($output.Count -eq 1 -and [string]$output[0] -ceq 'Misterious regression removed.') 'Default restoration output must not reveal the cause.'
     Assert-True ($mock.CreateCount -eq 2 -and $mock.Rules.Count -eq 4) 'Restore both original rule names and exact addresses.'
     Assert-True (!(Test-Path -LiteralPath $snapshotPath)) 'Clear the snapshot only after verified restoration.'
+    Assert-True ($mock.Flushes.Count -eq 4 -and @($mock.Flushes | Select-Object -Last 2 | Where-Object AllowancePresent).Count -eq 2) 'Refresh both databases after restoring the allowance.'
     $output = @(& $faultScript -ConfigPath $configPath -Restore *>&1)
     Assert-True ($output.Count -eq 1 -and [string]$output[0] -ceq 'Nothing to restore. Misterious regression is already reset.') 'A repeated successful restore must be safe and presentation-friendly.'
     Assert-True ($mock.CreateCount -eq 2 -and $mock.DeleteCount -eq 2) 'Repeating restore must not introduce any additional writes.'
@@ -228,6 +293,49 @@ try {
     $mock.IgnoreCreate = $true
     Assert-Fails { & $faultScript -ConfigPath $configPath -Restore } 'restoration could not be verified'
     Assert-True (Test-Path -LiteralPath $snapshotPath) 'Unverified restore must retain its snapshot.'
+
+    foreach ($failure in 'DenyPermission', 'FailOpenAt', 'FailToken') {
+        Reset-Fixture
+        if ($failure -eq 'DenyPermission' -or $failure -eq 'FailToken') { $mock[$failure] = $true } else { $mock[$failure] = 2 }
+        Assert-Fails { & $faultScript -ConfigPath $configPath } 'permission|open failure|17'
+        Assert-True ($mock.DeleteCount -eq 0 -and !(Test-Path $snapshotPath)) 'Preflight SQL/token failures must stop before changing the firewall.'
+        Assert-True (@($mock.Connections | Where-Object { !$_.Disposed }).Count -eq 0) 'Dispose connections after failed SQL preflight.'
+    }
+    Reset-Fixture
+    $mock.FailFlushAt = 2
+    $output = @()
+    Assert-Fails { $output = @(& $faultScript -ConfigPath $configPath *>&1) } 'recovery snapshot retained'
+    Assert-True ((Test-Path $snapshotPath) -and $mock.DeleteCount -eq 2) 'A partial injection cache failure keeps the original baseline.'
+    Assert-True (($output -join "`n") -notmatch 'Greetings from the Intern') 'Cache failure must not report successful introduction.'
+    $mock.FailFlushAt = 0
+    & $faultScript -ConfigPath $configPath -Restore
+    Assert-True (!(Test-Path $snapshotPath)) 'Restore recovers after a partially failed cache refresh.'
+
+    Reset-Fixture
+    & $faultScript -ConfigPath $configPath
+    $mock.FailFlushAt = 4
+    Assert-Fails { & $faultScript -ConfigPath $configPath -Restore } 'recovery snapshot retained'
+    Assert-True ($mock.Rules.Count -eq 4 -and (Test-Path $snapshotPath)) 'Restore reinstates firewall access even if a subsequent cache refresh fails.'
+    $mock.FailFlushAt = 0
+    & $faultScript -ConfigPath $configPath -Restore
+    Assert-True (!(Test-Path $snapshotPath) -and $mock.CreateCount -eq 2) 'Restore retries cache refresh without recreating already-restored rules.'
+    Assert-True (@($mock.Connections | Where-Object { !$_.Disposed }).Count -eq 0) 'Dispose all connections after restore retries.'
+
+    Reset-Fixture
+    & $faultScript -ConfigPath $configPath
+    $mock.FailToken = $true
+    Assert-Fails { & $faultScript -ConfigPath $configPath -Restore } 'recovery snapshot retained'
+    Assert-True ($mock.Rules.Count -eq 4 -and (Test-Path $snapshotPath)) 'Even unavailable operator authentication must not block restoring the firewall allowance.'
+    $mock.FailToken = $false
+    & $faultScript -ConfigPath $configPath -Restore
+    Assert-True (!(Test-Path $snapshotPath)) 'Restoration can finish once operator authentication is available.'
+
+    Reset-Fixture
+    $fixture = Get-Content $configPath -Raw | ConvertFrom-Json
+    $fixture.resources.databaseNames = @()
+    $fixture | ConvertTo-Json -Depth 4 | Set-Content $configPath
+    Assert-Fails { & $faultScript -ConfigPath $configPath } 'resources.databaseNames'
+    Assert-True ($mock.DeleteCount -eq 0 -and !(Test-Path $snapshotPath)) 'Missing database configuration must not leave an injected incident.'
 
     Write-Host "PASS: $checks SQL firewall regression checks; all Azure calls mocked, no live faults."
 }

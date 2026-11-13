@@ -16,6 +16,13 @@ local revision references after staging both images.
 After a rollout, reload CONTROL's `$Config`, `$Healthy`, and `$Candidate` variables.
 WATCH automatically discovers new active revisions without restarting.
 
+After changing deployments or regions, restart all three terminals and repeat
+initialization, including loading the new demo token. Existing processes and
+cached CONTROL variables still target the previous app. App, SQL server, vault,
+URL, and revision names come from local configuration, not from the region name.
+If old and new apps share the SQL server, Scenario 3 affects both apps even when
+their Container Apps environments are in different regions.
+
 ## Terminals and prerequisites
 
 Open **three PowerShell 7.4+ terminals** in the repository root. Keep their names
@@ -419,10 +426,18 @@ configuration for introduction and restoration. Do not delete the snapshot,
 change other firewall rules, disable public network access, or deploy Bicep
 during the incident; Bicep would recreate the allowance.
 
+The script refreshes firewall caches in both configured databases after
+introduction and restoration using the signed-in operator's Entra SQL token.
+Rehearse workstation SQL access and administrator or `KILL DATABASE CONNECTION`
+permission offstage; do not grant this permission to the app. Introduction
+checks access/permissions before changing rules. Restoration repairs the
+firewall first and retains the snapshot if cache refresh fails. SQL sessions
+are not killed, and app pooling/retry settings are unchanged.
+
 Both revisions must already use `Pooling=True;Load Balance Timeout=30;` for both
 databases, consistently across every scenario. Connections older than 30 seconds
 are retired when returned to the pool, not interrupted mid-query. SQL firewall
-propagation can still take several minutes; this is not a 30-second outage
+cache refresh reduces propagation delay, but this is not a 30-second outage
 guarantee.
 
 Privately establish a genuine SQL firewall rejection in console logs, commonly

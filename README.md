@@ -91,6 +91,17 @@ both database schemas and the seeded catalog.
 
 Deployment automatically saves returned resource identifiers, including
 `resources.applicationUrl`, to ignored local configuration without credentials.
+For a parallel regional deployment, use a separate ignored profile at
+`config\deployments\<profile>\azure.local.json` and pass `-ConfigPath` to the
+deployment, traffic, WATCH, smoke-test, and regression scripts. Keep that
+profile's firewall recovery snapshot beside its configuration. Do not copy
+old resource names, revisions, or secret references into the new profile.
+See [the parallel deployment procedure](DEPLOYMENT_PLAN.md#parallel-deployment-to-another-region)
+before switching the active root configuration; restart presenter terminals
+after switching targets.
+If only ACA changes region, use the
+[ACA-only relocation procedure](DEPLOYMENT_PLAN.md#move-only-container-apps-to-another-region)
+instead: SQL and the other dependencies keep their existing names and data.
 After your first deployment, those outputs are captured locally; run the HTTP
 workflow smoke test:
 
@@ -383,8 +394,26 @@ be enabled; other rules are not changed. An outstanding snapshot blocks another
 fault so that the original baseline is never overwritten. `-WhatIf` previews
 without writing the snapshot or changing Azure.
 
+To shorten firewall-cache latency, the script executes
+[`DBCC FLUSHAUTHCACHE`](https://learn.microsoft.com/sql/t-sql/database-console-commands/dbcc-flushauthcache-transact-sql?view=azuresqldb-current)
+in every database listed in `resources.databaseNames` after removing the
+allowance and again after restoration. Your signed-in operator needs SQL
+administrator access or `KILL DATABASE CONNECTION` permission in those
+databases, plus workstation firewall access. No permissions are granted to the
+app. Before introduction, the script opens operator connections and checks
+permission in every database before changing firewall rules. These short-lived
+operator connections are unpooled; application pooling is unchanged. Tokens
+stay in memory and are not passed as command-line arguments.
+
+The cache refresh does not kill existing sessions. A failed refresh is an
+explicit error, not a successful banner; the recovery snapshot remains.
+Restoration reinstates the saved allowance before attempting SQL access/cache
+refresh, so SQL access problems cannot prevent the firewall repair. A failed
+restore refresh keeps the snapshot so `-Restore` can retry.
+
 The script does **not** restart a revision or prove that the catalog has broken.
-Allow several minutes for firewall propagation. With the shared 30-second
+Refreshing the database caches reduces the normal firewall-cache delay but does
+not guarantee immediate failure. With the shared 30-second
 connection lifetime applied, older connections are discarded when returned to
 the pool; existing connections and active queries are not forcibly interrupted.
 This rotation is not a guarantee of an outage within 30 seconds: firewall

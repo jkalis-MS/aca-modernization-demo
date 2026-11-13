@@ -182,113 +182,35 @@ resource databases 'Microsoft.Sql/servers/databases@2025-01-01' = [for databaseN
   }
 }]
 
-resource environment 'Microsoft.App/managedEnvironments@2026-07-01' = {
-  name: 'cae-musicstore-${token}'
-  location: location
-  tags: tags
-  properties: {
-    workloadProfiles: [
-      { name: 'Consumption', workloadProfileType: 'Consumption' }
-    ]
-    appLogsConfiguration: {
-      destination: 'log-analytics'
-      logAnalyticsConfiguration: {
-        customerId: logs.properties.customerId
-        sharedKey: logs.listKeys().primarySharedKey
-      }
-    }
-  }
-}
-
-resource app 'Microsoft.App/containerApps@2026-07-01' = if (deployApplication) {
-  name: 'ca-musicstore-${token}'
-  location: location
-  tags: union(tags, { 'azd-service-name': 'web' })
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
-  }
-  properties: {
-    environmentId: environment.id
-    workloadProfileName: 'Consumption'
-    configuration: {
-      activeRevisionsMode: revisionMode
-      ingress: {
-        external: true
-        allowInsecure: false
-        targetPort: 8080
-        transport: 'http'
-        traffic: revisionTraffic
-      }
-      registries: [
-        { server: registry.properties.loginServer, identity: identity.id }
-      ]
-      secrets: concat([
-        { name: 'appinsights', value: insights.properties.ConnectionString }
-      ], demoEnabled ? [
-        { name: 'demo-token', keyVaultUrl: demoTokenSecretUri, identity: identity.id }
-      ] : [])
-    }
-    template: {
-      revisionSuffix: empty(revisionSuffix) ? null : revisionSuffix
-      containers: [
-        {
-          name: 'web'
-          image: containerImage
-          resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: concat([
-            { name: 'ASPNETCORE_ENVIRONMENT', value: 'Production' }
-            { name: 'ASPNETCORE_FORWARDEDHEADERS_ENABLED', value: 'true' }
-            { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
-            { name: 'KeyVaultName', value: vault.name }
-            { name: 'Database__RecreateOnStartup', value: 'false' }
-            { name: 'ApplicationInsights__ConnectionString', secretRef: 'appinsights' }
-            {
-              name: 'ConnectionStrings__MusicStoreEntities'
-              value: 'Server=tcp:${sql.properties.fullyQualifiedDomainName},1433;Initial Catalog=${databaseNames[0]};Authentication=Active Directory Managed Identity;User Id=${identity.properties.clientId};Encrypt=True;TrustServerCertificate=False;Pooling=True;Load Balance Timeout=30;'
-            }
-            {
-              name: 'ConnectionStrings__DefaultConnection'
-              value: 'Server=tcp:${sql.properties.fullyQualifiedDomainName},1433;Initial Catalog=${databaseNames[1]};Authentication=Active Directory Managed Identity;User Id=${identity.properties.clientId};Encrypt=True;TrustServerCertificate=False;Pooling=True;Load Balance Timeout=30;'
-            }
-          ], demoEnabled ? [
-            { name: 'Demo__Enabled', value: 'true' }
-            { name: 'Demo__IsolatedEnvironment', value: string(demoIsolatedEnvironment) }
-            { name: 'Demo__Token', secretRef: 'demo-token' }
-          ] : [])
-          probes: [
-            {
-              type: 'Startup'
-              httpGet: { path: '/health/ready', port: 8080, scheme: 'HTTP' }
-              periodSeconds: 10
-              timeoutSeconds: 5
-              failureThreshold: 60
-            }
-            {
-              type: 'Readiness'
-              httpGet: { path: '/health/ready', port: 8080, scheme: 'HTTP' }
-              periodSeconds: readinessPeriodSeconds
-              timeoutSeconds: readinessTimeoutSeconds
-              failureThreshold: readinessFailureThreshold
-            }
-            {
-              type: 'Liveness'
-              httpGet: { path: '/health/live', port: 8080, scheme: 'HTTP' }
-              periodSeconds: 30
-              timeoutSeconds: 5
-              failureThreshold: 3
-            }
-          ]
-        }
-      ]
-      scale: {
-        minReplicas: demoEnabled ? demoMinReplicas : replicaCount
-        maxReplicas: demoEnabled ? demoMaxReplicas : replicaCount
-        rules: demoEnabled ? [
-          { name: 'demo-http', http: { metadata: { concurrentRequests: string(httpConcurrency) } } }
-        ] : []
-      }
-    }
+module containerApp './container-app.bicep' = {
+  name: 'musicstore-container-app'
+  params: {
+    location: location
+    containerAppName: 'ca-musicstore-${token}'
+    containerAppEnvironmentName: 'cae-musicstore-${token}'
+    tags: tags
+    identityName: identity.name
+    registryName: registry.name
+    keyVaultName: vault.name
+    logWorkspaceName: logs.name
+    applicationInsightsName: insights.name
+    sqlServerName: sql.name
+    databaseNames: databaseNames
+    deployApplication: deployApplication
+    containerImage: containerImage
+    replicaCount: replicaCount
+    demoEnabled: demoEnabled
+    demoIsolatedEnvironment: demoIsolatedEnvironment
+    demoTokenSecretUri: demoTokenSecretUri
+    demoMinReplicas: demoMinReplicas
+    demoMaxReplicas: demoMaxReplicas
+    httpConcurrency: httpConcurrency
+    revisionMode: revisionMode
+    revisionSuffix: revisionSuffix
+    revisionTraffic: revisionTraffic
+    readinessPeriodSeconds: readinessPeriodSeconds
+    readinessTimeoutSeconds: readinessTimeoutSeconds
+    readinessFailureThreshold: readinessFailureThreshold
   }
   dependsOn: [registryPull, vaultRead, databases]
 }
@@ -306,8 +228,8 @@ output resources object = {
   keyVaultName: vault.name
   logWorkspaceName: logs.name
   applicationInsightsName: insights.name
-  environmentName: environment.name
+  environmentName: containerApp.outputs.environmentName
   appName: 'ca-musicstore-${token}'
-  applicationUrl: deployApplication ? 'https://${app!.properties.configuration.ingress.fqdn}' : ''
+  applicationUrl: containerApp.outputs.applicationUrl
   logWorkspaceId: logs.properties.customerId
 }

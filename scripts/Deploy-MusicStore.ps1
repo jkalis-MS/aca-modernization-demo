@@ -36,6 +36,12 @@ if ($SubscriptionId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-
 }
 if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhiteSpace($Location) -or
     [string]::IsNullOrWhiteSpace($EnvironmentName)) { throw 'Deployment target settings must not be empty.' }
+if ($ResourceGroupName -eq $config.deployment.resourceGroupName -and
+    $config.deployment.psobject.Properties['containerAppLocation'] -and
+    ![string]::IsNullOrWhiteSpace($config.deployment.containerAppLocation) -and
+    ($config.deployment.containerAppLocation -replace '\s', '') -ne ($Location -replace '\s', '')) {
+    throw 'This profile uses a different Container Apps region. Deploy src\infra\container-app.bicep for ACA-only changes; the full-stack script would target the original regional app. Use a separate profile for a new full-stack deployment.'
+}
 
 function Invoke-Azure {
     param([string[]]$Arguments)

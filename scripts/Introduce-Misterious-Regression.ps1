@@ -6,6 +6,9 @@ Introduces or restores the isolated demo's Azure SQL firewall regression.
 Removes only server firewall rules whose start and end addresses are 0.0.0.0.
 Saves a recovery snapshot beside the local Azure configuration before changing
 anything. Public network access and all other firewall rules are left alone.
+Refreshes each configured database's firewall cache using the operator's Entra
+identity. Requires workstation SQL access and KILL DATABASE CONNECTION permission
+or SQL administrator access. Does not terminate existing sessions.
 Does not restart revisions, change traffic, or verify a catalog outage.
 Normal success output keeps the cause hidden; use -Verbose for operator details.
 Repeating -Restore without a snapshot is a no-op only if the allowance is enabled.
@@ -32,7 +35,7 @@ if (!$Restore -and (Test-Path -LiteralPath $snapshotPath)) {
     throw "A recovery snapshot already exists at '$snapshotPath'. Use -Restore before introducing another fault; the original baseline will not be overwritten."
 }
 
-$server = az sql server show --subscription $config.deployment.subscriptionId --resource-group $config.deployment.resourceGroupName --name $config.resources.sqlServerName --query '{id:id,publicNetworkAccess:publicNetworkAccess}' --output json --only-show-errors | ConvertFrom-Json
+$server = az sql server show --subscription $config.deployment.subscriptionId --resource-group $config.deployment.resourceGroupName --name $config.resources.sqlServerName --query '{id:id,publicNetworkAccess:publicNetworkAccess,fullyQualifiedDomainName:fullyQualifiedDomainName}' --output json --only-show-errors | ConvertFrom-Json
 if ([string]::IsNullOrWhiteSpace($server.id)) {
     throw 'Azure CLI did not return the SQL server identity.'
 }
@@ -47,6 +50,61 @@ $azure = @(
 )
 $rules = @(az sql server firewall-rule list @azure --output json | ConvertFrom-Json)
 
+$cacheConnections = [System.Collections.Generic.List[object]]::new()
+function Open-CacheConnections {
+    if (!$config.resources.psobject.Properties['databaseNames'] -or
+        $config.resources.databaseNames -isnot [array] -or $config.resources.databaseNames.Count -eq 0 -or
+        @($config.resources.databaseNames | Where-Object {
+            $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) -or $_ -eq 'master'
+        }).Count -gt 0) {
+        throw 'Configure resources.databaseNames with the user databases whose firewall caches must be refreshed.'
+    }
+    if ([string]::IsNullOrWhiteSpace($server.fullyQualifiedDomainName)) {
+        throw 'Azure CLI did not return the SQL server endpoint.'
+    }
+    $sqlToken = az account get-access-token --subscription $config.deployment.subscriptionId --resource https://database.windows.net/ --query accessToken --output tsv --only-show-errors
+    if ([string]::IsNullOrWhiteSpace($sqlToken)) { throw 'Azure CLI did not return an operator SQL access token.' }
+    try {
+        foreach ($database in $config.resources.databaseNames | Select-Object -Unique) {
+            $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+            $builder['Data Source'] = "tcp:$($server.fullyQualifiedDomainName),1433"
+            $builder['Initial Catalog'] = $database
+            $builder['Encrypt'] = $true
+            $builder['TrustServerCertificate'] = $false
+            $builder['Pooling'] = $false
+            $builder['Connect Timeout'] = 15
+            $connection = New-Object -TypeName System.Data.SqlClient.SqlConnection -ArgumentList $builder.ConnectionString
+            $cacheConnections.Add($connection)
+            $connection.AccessToken = $sqlToken
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            try {
+                $command.CommandTimeout = 15
+                $command.CommandText = "SELECT HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'KILL DATABASE CONNECTION');"
+                if ($command.ExecuteScalar() -ne 1) {
+                    throw "Operator lacks permission to refresh the firewall cache in '$database'. Use a SQL administrator or KILL DATABASE CONNECTION permission; do not grant it to the app."
+                }
+            }
+            finally { $command.Dispose() }
+        }
+    }
+    finally { $sqlToken = $null }
+}
+
+function Refresh-FirewallCaches {
+    foreach ($connection in $cacheConnections) {
+        $command = $connection.CreateCommand()
+        try {
+            $command.CommandTimeout = 15
+            $command.CommandText = 'DBCC FLUSHAUTHCACHE;'
+            $null = $command.ExecuteNonQuery()
+        }
+        finally { $command.Dispose() }
+    }
+    Write-Verbose 'Configured databases refreshed their firewall caches. Existing application sessions were not disconnected.'
+}
+
+try {
 if ($Restore) {
     if (!(Test-Path -LiteralPath $snapshotPath -PathType Leaf)) {
         if ($rules | Where-Object {
@@ -93,6 +151,8 @@ if ($Restore) {
             throw "Firewall restoration could not be verified for '$($rule.name)'. Recovery snapshot retained."
         }
     }
+    Open-CacheConnections
+    Refresh-FirewallCaches
     Remove-Item -LiteralPath $snapshotPath
     Write-Verbose 'Saved Azure-services firewall allowance restored. Recovery snapshot cleared for the next rehearsal.'
     Write-Verbose 'Allow time for propagation, then check catalog recovery; no revision was restarted.'
@@ -108,6 +168,8 @@ if ($azureRules.Count -eq 0) {
 }
 if (!$PSCmdlet.ShouldProcess($server.id, 'Save the firewall baseline and disable the Azure-services allowance for all databases on this SQL server')) { return }
 
+# Keep operator connections open so removing the allowance cannot block the refresh.
+Open-CacheConnections
 $snapshot = [ordered]@{
     schemaVersion = 1
     capturedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
@@ -127,6 +189,7 @@ if ($remaining | Where-Object {
 }) {
     throw 'The Azure-services allowance is still present. Recovery snapshot retained; inspect the firewall before continuing.'
 }
+Refresh-FirewallCaches
 Write-Verbose 'Azure-services firewall allowance disabled. Public network access and other firewall rules were not changed.'
 Write-Verbose 'Existing SQL connections may keep working for several minutes. Other server/database firewall rules can also permit access; no revision was restarted.'
 $restoreCommand = '.\scripts\Introduce-Misterious-Regression.ps1 -Restore'
@@ -159,3 +222,13 @@ IIIII N   N   T   R  RR  OOO  DDDD   UUU   CCC  EEEEE DDDD
       \  \__/  /
        '------'
 '@ -ForegroundColor Cyan
+}
+catch {
+    if (Test-Path -LiteralPath $snapshotPath) {
+        throw "Firewall operation or cache refresh failed; recovery snapshot retained. Run this script with -Restore to recover or retry restoration. $($_.Exception.Message)"
+    }
+    throw
+}
+finally {
+    foreach ($connection in $cacheConnections) { $connection.Dispose() }
+}

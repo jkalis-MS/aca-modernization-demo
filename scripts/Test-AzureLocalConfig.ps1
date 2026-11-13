@@ -47,6 +47,30 @@ try {
     $loaded = & $helper -ConfigPath $path -RequiredSettings resources.applicationUrl
     if ($loaded.resources.applicationUrl -ne 'https://example.invalid') { throw 'Required local value was not loaded.' }
     $checks++
+    $fixture.deployment.resourceGroupName = 'rg-test'
+    $fixture.deployment.environmentName = 'test'
+    $fixture.deployment.location = 'westus'
+    $fixture.deployment.containerAppLocation = 'westus2'
+    $fixture | ConvertTo-Json -Depth 10 | Set-Content $path
+    $azureCalls = [System.Collections.Generic.List[string]]::new()
+    function az {
+        $azureCalls.Add('Azure')
+        throw 'Mock Azure boundary reached'
+    }
+    $deploy = Join-Path $PSScriptRoot 'Deploy-MusicStore.ps1'
+    Assert-Refused { & $deploy -ConfigPath $path } 'different Container Apps region'
+    Assert-Refused { & $deploy -ConfigPath $path -ResetDemoConfiguration } 'different Container Apps region'
+    if ($azureCalls.Count -ne 0) { throw 'Split-region guard must stop before any Azure operation.' }
+    $checks++
+    Assert-Refused { & $deploy -ConfigPath $path -ResourceGroupName rg-new } 'Mock Azure boundary reached'
+    $fixture.deployment.containerAppLocation = 'West US'
+    $fixture | ConvertTo-Json -Depth 10 | Set-Content $path
+    Assert-Refused { & $deploy -ConfigPath $path } 'Mock Azure boundary reached'
+    $fixture.deployment.psobject.Properties.Remove('containerAppLocation')
+    $fixture | ConvertTo-Json -Depth 10 | Set-Content $path
+    Assert-Refused { & $deploy -ConfigPath $path } 'Mock Azure boundary reached'
+    if ($azureCalls.Count -ne 3) { throw 'Ordinary and explicitly separate deployments must still reach the Azure boundary.' }
+    $checks++
     '{}' | Set-Content $path
     Assert-Refused { & $helper -ConfigPath $path } 'schemaVersion'
     '{invalid' | Set-Content $path
