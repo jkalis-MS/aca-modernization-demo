@@ -152,7 +152,7 @@ Verify resource locations, Consumption assignment, catalog/readiness, both demo
 image identities, and candidate behavior before switching the active local
 configuration. Keep the old stack intact. Restart the three presenter terminals
 and reload the new token: already-running scripts and cached `$Config`, `$Azure`,
-`$Healthy`, and `$Candidate` variables do not follow a configuration-file change.
+`$V1`, and `$V2` variables do not follow a configuration-file change.
 Rehearse Cascade's SRE Agent access against the new app separately.
 
 ### Move only Container Apps to another region

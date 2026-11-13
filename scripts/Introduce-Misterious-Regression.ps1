@@ -4,10 +4,12 @@
 Introduces or restores the isolated demo's Azure SQL firewall regression.
 .DESCRIPTION
 Removes only server firewall rules whose start and end addresses are 0.0.0.0.
-Saves a recovery snapshot beside the local Azure configuration before changing
-anything. Public network access and all other firewall rules are left alone.
+Ensures Admin Access allows this workstation's detected public IPv4 address
+before opening SQL connections. This dedicated rule is retained after restoration.
+Saves a recovery snapshot beside the local Azure configuration before removing
+the Azure-services allowance. Public network access and other rules are left alone.
 Refreshes each configured database's firewall cache using the operator's Entra
-identity. Requires workstation SQL access and KILL DATABASE CONNECTION permission
+identity. Requires firewall write access and KILL DATABASE CONNECTION permission
 or SQL administrator access. Does not terminate existing sessions.
 Does not restart revisions, change traffic, or verify a catalog outage.
 Normal success output keeps the cause hidden; use -Verbose for operator details.
@@ -49,6 +51,34 @@ $azure = @(
     '--only-show-errors'
 )
 $rules = @(az sql server firewall-rule list @azure --output json | ConvertFrom-Json)
+
+function Ensure-PresenterAccess {
+    $clientIp = ([string](Invoke-RestMethod 'https://api.ipify.org' -TimeoutSec 15)).Trim()
+    $address = [System.Net.IPAddress]::None
+    if (![System.Net.IPAddress]::TryParse($clientIp, [ref]$address) -or
+        $address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
+        $address.ToString() -ne $clientIp -or
+        [System.Net.IPAddress]::IsLoopback($address) -or
+        $clientIp -in '0.0.0.0', '255.255.255.255') {
+        throw 'Public IP lookup did not return a valid workstation IPv4 address. No presenter firewall rule changed.'
+    }
+    $existing = @($rules | Where-Object name -EQ 'Admin Access')
+    if ($existing | Where-Object { $_.startIpAddress -eq '0.0.0.0' -and $_.endIpAddress -eq '0.0.0.0' }) {
+        throw 'Admin Access is an Azure-services allowance, not a workstation rule. Rename that rule before continuing.'
+    }
+    if ($existing | Where-Object { $_.startIpAddress -ne $_.endIpAddress }) {
+        throw 'Admin Access is not a single-address rule. Refusing to overwrite an existing address range.'
+    }
+    if ($existing | Where-Object { $_.startIpAddress -eq $clientIp -and $_.endIpAddress -eq $clientIp }) {
+        return
+    }
+    az sql server firewall-rule create @azure --name 'Admin Access' --start-ip-address $clientIp --end-ip-address $clientIp --output none
+    $verified = @(az sql server firewall-rule list @azure --output json | ConvertFrom-Json)
+    if (!($verified | Where-Object { $_.name -eq 'Admin Access' -and $_.startIpAddress -eq $clientIp -and $_.endIpAddress -eq $clientIp })) {
+        throw 'Admin Access firewall rule could not be verified. No Azure-services allowance was removed.'
+    }
+    Write-Verbose 'Admin Access now allows this workstation only. SQL firewall propagation can take up to five minutes; retry if SQL access is not available yet.'
+}
 
 $cacheConnections = [System.Collections.Generic.List[object]]::new()
 function Open-CacheConnections {
@@ -137,7 +167,7 @@ if ($Restore) {
             throw "Firewall rule '$($rule.name)' has different addresses. Refusing to overwrite an external change; recovery snapshot retained."
         }
     }
-    if (!$PSCmdlet.ShouldProcess($server.id, 'Restore the saved Azure-services firewall allowance')) { return }
+    if (!$PSCmdlet.ShouldProcess($server.id, 'Restore the saved Azure-services firewall allowance and ensure Admin Access')) { return }
     foreach ($rule in $azureRules) {
         if (!($rules | Where-Object name -EQ $rule.name)) {
             az sql server firewall-rule create @azure --name $rule.name --start-ip-address $rule.startIpAddress --end-ip-address $rule.endIpAddress --output none
@@ -151,6 +181,8 @@ if ($Restore) {
             throw "Firewall restoration could not be verified for '$($rule.name)'. Recovery snapshot retained."
         }
     }
+    $rules = $restored
+    Ensure-PresenterAccess
     Open-CacheConnections
     Refresh-FirewallCaches
     Remove-Item -LiteralPath $snapshotPath
@@ -166,8 +198,10 @@ $azureRules = @($rules | Where-Object {
 if ($azureRules.Count -eq 0) {
     throw 'The Azure-services firewall allowance is already disabled. No firewall rules changed or recovery snapshot created.'
 }
-if (!$PSCmdlet.ShouldProcess($server.id, 'Save the firewall baseline and disable the Azure-services allowance for all databases on this SQL server')) { return }
+if (!$PSCmdlet.ShouldProcess($server.id, 'Ensure Admin Access, save the firewall baseline, and disable the Azure-services allowance for all databases on this SQL server')) { return }
 
+Ensure-PresenterAccess
+$rules = @(az sql server firewall-rule list @azure --output json | ConvertFrom-Json)
 # Keep operator connections open so removing the allowance cannot block the refresh.
 Open-CacheConnections
 $snapshot = [ordered]@{

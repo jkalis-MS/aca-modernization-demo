@@ -13,7 +13,7 @@ both healthy and candidate images from code supporting the combined `demo`
 operation when setting up another deployment. Older images support only separate
 operations; changing PowerShell does not update those images. Update your ignored
 local revision references after staging both images.
-After a rollout, reload CONTROL's `$Config`, `$Healthy`, and `$Candidate` variables.
+After a rollout, reload CONTROL's `$Config`, `$V1`, and `$V2` variables.
 WATCH automatically discovers new active revisions without restarting.
 
 After changing deployments or regions, restart all three terminals and repeat
@@ -88,8 +88,8 @@ Set-Location -LiteralPath '<repository-root>'
 $Host.UI.RawUI.WindowTitle = '1 - CONTROL'; $Host.UI.RawUI.BackgroundColor = 'Black'; $Host.UI.RawUI.ForegroundColor = 'White'; Write-Host "`e]11;#202020`a`e[48;2;32;32;32m`e[2J`e[H" -NoNewline
 function global:prompt { 'CONTROL> ' }
 $Config = .\scripts\Get-AzureLocalConfig.ps1 -RequiredSettings deployment.tenantId,deployment.resourceGroupName,resources.containerAppName,resources.applicationUrl,resources.sqlServerName,demo.healthyRevision,demo.candidateRevision
-$Healthy = $Config.demo.healthyRevision
-$Candidate = $Config.demo.candidateRevision
+$V1 = $Config.demo.healthyRevision
+$V2 = $Config.demo.candidateRevision
 $Azure = @('--subscription', $Config.deployment.subscriptionId, '--resource-group', $Config.deployment.resourceGroupName, '--name', $Config.resources.containerAppName)
 ```
 
@@ -111,7 +111,7 @@ and HTTP concurrency target 5. Both revisions should be healthy.
 ```powershell
 az containerapp show @Azure --query '{mode:properties.configuration.activeRevisionsMode,traffic:properties.configuration.ingress.traffic}' -o json
 az containerapp revision list @Azure --query '[].{revision:name,healthy:properties.healthState,traffic:properties.trafficWeight,min:properties.template.scale.minReplicas,max:properties.template.scale.maxReplicas}' -o table
-az containerapp revision show @Azure --revision $Healthy --query properties.template.scale -o json
+az containerapp revision show @Azure --revision $V1 --query properties.template.scale -o json
 ```
 
 If staging is incomplete or values differ, stop and correct them offstage.
@@ -161,7 +161,7 @@ Pin public traffic to the healthy revision. This also resets a previous canary.
 **Run in TERMINAL 1: CONTROL - PowerShell.**
 
 ```powershell
-az containerapp ingress traffic set @Azure --revision-weight "$Healthy=100" "$Candidate=0" --output none
+az containerapp ingress traffic set @Azure --revision-weight "$V1=100" "$V2=0" --output none
 ```
 
 **Run in TERMINAL 2: TRAFFIC - PowerShell.**
@@ -224,9 +224,9 @@ Verify ordinary browsing and readiness through the candidate's direct URL.
 **Run in TERMINAL 1: CONTROL - PowerShell.**
 
 ```powershell
-$CandidateHost = az containerapp revision show @Azure --revision $Candidate --query properties.fqdn -o tsv
-(Invoke-WebRequest "https://$CandidateHost/health/ready" -TimeoutSec 15).StatusCode
-(Invoke-WebRequest "https://$CandidateHost/Store/Browse?genre=Rock" -TimeoutSec 15).StatusCode
+$V2Host = az containerapp revision show @Azure --revision $V2 --query properties.fqdn -o tsv
+(Invoke-WebRequest "https://$V2Host/health/ready" -TimeoutSec 15).StatusCode
+(Invoke-WebRequest "https://$V2Host/Store/Browse?genre=Rock" -TimeoutSec 15).StatusCode
 ```
 
 Both must return 200. This is intentionally a regression that passes readiness:
@@ -246,7 +246,7 @@ command shown there.
 **Run in TERMINAL 1: CONTROL - PowerShell.**
 
 ```powershell
-az containerapp ingress traffic set @Azure --revision-weight "$Healthy=90" "$Candidate=10" --output none
+az containerapp ingress traffic set @Azure --revision-weight "$V1=90" "$V2=10" --output none
 ```
 
 **Point to TRAFFIC:** both version identities, healthy successes, and candidate
@@ -262,14 +262,14 @@ to the healthy revision." Roll back even if the sampler reports an error.
 **Run in TERMINAL 1: CONTROL - PowerShell.**
 
 ```powershell
-az containerapp ingress traffic set @Azure --revision-weight "$Healthy=100" "$Candidate=0" --output none
+az containerapp ingress traffic set @Azure --revision-weight "$V1=100" "$V2=0" --output none
 az containerapp show @Azure --query properties.configuration.ingress.traffic -o table
 ```
 
 Leave the same TRAFFIC process running. After routing propagation, in-flight
 requests drain, and old failures age out of the 10-second window, expect
 **LAST 10s** to show successful responses and zero errors. The
-traffic status returns to green. Historical error totals do not reset or decrease;
+recent error count returns to its normal color. Historical error totals do not reset or decrease;
 the candidate remains in the cumulative identity table, but its HTTP 503 count
 stops growing. A window with no responses
 is not rollback evidence. If new candidate errors persist, stop and inspect; do
@@ -422,7 +422,18 @@ this SQL server; ensure there are no other consumers.
 The regression script saves the baseline in the ignored
 `config\sql-firewall-regression.local.json`, then removes only the
 `0.0.0.0`–`0.0.0.0` Azure-services firewall allowance. Use the same checkout and
-configuration for introduction and restoration. Do not delete the snapshot,
+configuration for introduction and restoration. Before connecting to SQL, the
+script automatically creates or updates `Admin Access` for the workstation's
+detected public IPv4 address. It preserves `DeploymentClient` and all other
+rules. `Admin Access` remains after restoration; a network change updates
+its single allowed address on the next introduction or restoration. No config
+edit or redeployment is needed. Verify firewall write permissions and rehearse
+this at the venue; propagation can take up to five minutes. If SQL access
+initially fails, wait and rerun the same command.
+An existing `PresenterLaptop` rule is not renamed or deleted automatically.
+After restoring any incident and verifying `Admin Access` works, remove the old
+rule if it is no longer needed.
+Do not delete the snapshot,
 change other firewall rules, disable public network access, or deploy Bicep
 during the incident; Bicep would recreate the allowance.
 
@@ -430,7 +441,7 @@ The script refreshes firewall caches in both configured databases after
 introduction and restoration using the signed-in operator's Entra SQL token.
 Rehearse workstation SQL access and administrator or `KILL DATABASE CONNECTION`
 permission offstage; do not grant this permission to the app. Introduction
-checks access/permissions before changing rules. Restoration repairs the
+checks access/permissions before removing Azure-services rules. Restoration repairs the
 firewall first and retains the snapshot if cache refresh fails. SQL sessions
 are not killed, and app pooling/retry settings are unchanged.
 
@@ -479,7 +490,7 @@ Remove-Item Env:\MUSICSTORE_DEMO_TOKEN -ErrorAction SilentlyContinue
 **Run in TERMINAL 1: CONTROL - PowerShell.**
 
 ```powershell
-az containerapp ingress traffic set @Azure --revision-weight "$Healthy=100" "$Candidate=0" --output none
+az containerapp ingress traffic set @Azure --revision-weight "$V1=100" "$V2=0" --output none
 az containerapp revision list @Azure --query '[].{revision:name,health:properties.healthState,traffic:properties.trafficWeight,replicas:properties.replicas}' -o table
 ```
 

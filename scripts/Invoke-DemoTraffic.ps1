@@ -439,9 +439,6 @@ function Show-TrafficStatus {
     param($Snapshot, [switch]$Finished)
     if ($refreshScreen) { Clear-Host }
     $state = if ($Snapshot.StopReason) { 'STOPPED' } elseif ($Finished) { 'FINISHED' } else { 'RUNNING' }
-    $color = if ($Snapshot.UnexpectedErrors -or $Snapshot.StopReason) { 'Red' } elseif (
-        ($releaseChecks -and (!$Snapshot.RecentCompleted -or $Snapshot.RecentErrors)) -or
-        (!$releaseChecks -and $Snapshot.Errors)) { 'Yellow' } else { 'Green' }
     $rate = if ($Snapshot.ElapsedSeconds -gt 0) { $Snapshot.Completed / $Snapshot.ElapsedSeconds } else { 0 }
     $replicaCount = @($Snapshot.Identities | Select-Object -ExpandProperty Replica -Unique).Count
     Write-Host ''
@@ -452,31 +449,83 @@ function Show-TrafficStatus {
     Write-Host ('  Elapsed {0:N0}{1} | {2} | Concurrency {3}' -f
         $Snapshot.ElapsedSeconds, $durationLabel, $requestLabel, $Concurrency)
     Write-Host ''
-    Write-Host ('  IN FLIGHT {0}   |   RESPONDING REPLICAS {1}   |   AVG {2:N1}/s' -f
-        $Snapshot.InFlight, $replicaCount, $rate) -ForegroundColor $color
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $rows.Add(@{
+        Cells = @("IN FLIGHT $($Snapshot.InFlight)", "RESPONDING REPLICAS $replicaCount", ('AVG {0:N1}/s' -f $rate))
+        GreenFragments = @{}
+        RedFragments = @{}
+    })
     $latencyLabel = if ($Scenario -notin 'Demo', 'Scale' -or $VerbosePreference -eq 'Continue') {
-        '   |   LATENCY p50 {0:N0}ms / p95 {1:N0}ms' -f $Snapshot.P50Ms, $Snapshot.P95Ms
+        'LATENCY p50 {0:N0}ms / p95 {1:N0}ms' -f $Snapshot.P50Ms, $Snapshot.P95Ms
     } else { '' }
     $totalLabel = if ($releaseChecks) { 'TOTAL ' } else { '' }
-    Write-Host (('  {0}SUCCESS {1:N0}   |   ERRORS {2:N0}' -f
-        $totalLabel, $Snapshot.Success, $Snapshot.Errors) + $latencyLabel) -ForegroundColor $color
+    $rows.Add(@{
+        Cells = @(('{0}SUCCESS {1:N0}' -f $totalLabel, $Snapshot.Success), ('ERRORS {0:N0}' -f $Snapshot.Errors), $latencyLabel)
+        GreenFragments = $(if ($Snapshot.Success -gt 0) { @{ 0 = '{0:N0}' -f $Snapshot.Success } } else { @{} })
+        RedFragments = $(if ($Snapshot.Errors -gt 0) { @{ 1 = '{0:N0}' -f $Snapshot.Errors } } else { @{} })
+    })
     $showReleaseStatus = $Scenario -eq 'Release' -or ($Scenario -eq 'Demo' -and $Snapshot.Errors -gt 0)
     if ($showReleaseStatus) {
-        Write-Host ('  LAST 10s | SUCCESS {0:N0} | ERRORS {1:N0}' -f
-            $Snapshot.RecentSuccess, $Snapshot.RecentErrors) -ForegroundColor $color
-        if (!$Snapshot.RecentCompleted) { Write-Host '  No completed responses in the last 10s.' -ForegroundColor Yellow }
+        $rows.Add(@{
+            Cells = @('LAST 10s', ('SUCCESS {0:N0}' -f $Snapshot.RecentSuccess), ('ERRORS {0:N0}' -f $Snapshot.RecentErrors))
+            GreenFragments = $(if ($Snapshot.RecentSuccess -gt 0) { @{ 1 = '{0:N0}' -f $Snapshot.RecentSuccess } } else { @{} })
+            RedFragments = $(if ($Snapshot.RecentErrors -gt 0) { @{ 2 = '{0:N0}' -f $Snapshot.RecentErrors } } else { @{} })
+        })
     }
     if ($Snapshot.UnexpectedErrors -or $Snapshot.Timeouts -or $VerbosePreference -eq 'Continue') {
-        Write-Host ('  Unexpected {0} | Timeouts {1} | Cancelled {2}' -f
-            $Snapshot.UnexpectedErrors, $Snapshot.Timeouts, $Snapshot.Cancellations)
+        $rows.Add(@{
+            Cells = @("Unexpected $($Snapshot.UnexpectedErrors)", "Timeouts $($Snapshot.Timeouts)", "Cancelled $($Snapshot.Cancellations)")
+            GreenFragments = @{}
+            RedFragments = @{
+                0 = $(if ($Snapshot.UnexpectedErrors -gt 0) { [string]$Snapshot.UnexpectedErrors } else { '' })
+                1 = $(if ($Snapshot.Timeouts -gt 0) { [string]$Snapshot.Timeouts } else { '' })
+            }
+        })
     }
     foreach ($failure in ($Snapshot.FailureCounts.GetEnumerator() | Sort-Object Key)) {
-        Write-Host "  FAILURE $($failure.Value): $($failure.Key)" -ForegroundColor Red
+        $details = $failure.Key -split ' \| ', 2
+        $rows.Add(@{
+            Cells = @(('FAILURE {0:N0}' -f $failure.Value), $details[0], $details[1])
+            GreenFragments = @{}
+            RedFragments = @{ 0 = '{0:N0}' -f $failure.Value }
+        })
+    }
+    $widths = @(0, 0, 0)
+    foreach ($row in $rows) {
+        foreach ($column in 0..2) { $widths[$column] = [Math]::Max($widths[$column], $row.Cells[$column].Length) }
+    }
+    $border = '  +' + (($widths | ForEach-Object { '-' * ($_ + 2) }) -join '+') + '+'
+    Write-Host $border
+    foreach ($row in $rows) {
+        Write-Host '  |' -NoNewline
+        foreach ($column in 0..2) {
+            Write-Host ' ' -NoNewline
+            $greenFragment = $row.GreenFragments[$column]
+            $redFragment = $row.RedFragments[$column]
+            $fragment = if ($redFragment) { $redFragment } else { $greenFragment }
+            $fragmentIndex = if ($fragment) {
+                $row.Cells[$column].IndexOf($fragment, [StringComparison]::Ordinal)
+            } else { -1 }
+            if ($fragmentIndex -ge 0) {
+                Write-Host $row.Cells[$column].Substring(0, $fragmentIndex) -NoNewline
+                $fragmentColor = if ($redFragment) { 'Red' } else { 'Green' }
+                Write-Host $fragment -ForegroundColor $fragmentColor -NoNewline
+                Write-Host $row.Cells[$column].Substring($fragmentIndex + $fragment.Length) -NoNewline
+            } else {
+                Write-Host $row.Cells[$column] -NoNewline
+            }
+            Write-Host (' ' * ($widths[$column] - $row.Cells[$column].Length + 1) + '|') -NoNewline
+        }
+        Write-Host ''
+        Write-Host $border
+    }
+    if ($showReleaseStatus -and !$Snapshot.RecentCompleted) {
+        Write-Host '  No completed responses in the last 10s.' -ForegroundColor Yellow
     }
     Write-Host ''
     $identities = @($Snapshot.Identities | Sort-Object Count -Descending)
     $statusCodes = @($identities | ForEach-Object { $_.StatusCounts.Keys } | Sort-Object -Unique)
-    $tableHeader = '  {0,-20} {1,-22} {2,-8} {3,8}' -f 'VERSION', 'INSTANCE', 'PROCESS', 'REQUESTS'
+    $tableHeader = '  {0,-20} {1,-22} {2,8}' -f 'VERSION', 'REPLICA', 'REQUESTS'
     foreach ($status in $statusCodes) { $tableHeader += ' {0,8}' -f "HTTP $status" }
     Write-Host $tableHeader
     foreach ($identity in ($identities | Select-Object -First 8)) {
@@ -485,15 +534,26 @@ function Show-TrafficStatus {
         } else { $identity.Replica }
         $shortVersion = if ($identity.Version.Length -gt 20) { $identity.Version.Substring(0, 17) + '...' } else { $identity.Version }
         $shortInstance = if ($instance.Length -gt 22) { '...' + $instance.Substring($instance.Length - 19) } else { $instance }
-        $shortProcess = $identity.Process.Substring(0, [Math]::Min(8, $identity.Process.Length))
-        $tableRow = '  {0,-20} {1,-22} {2,-8} {3,8:N0}' -f $shortVersion, $shortInstance, $shortProcess, $identity.Count
+        Write-Host ('  {0,-20} {1,-22} {2,8:N0}' -f
+            $shortVersion, $shortInstance, $identity.Count) -NoNewline
         foreach ($status in $statusCodes) {
             $statusCount = if ($identity.StatusCounts.ContainsKey([int]$status)) { $identity.StatusCounts[[int]$status] } else { 0 }
-            $tableRow += ' {0,8:N0}' -f $statusCount
+            $formattedCount = ' {0,8:N0}' -f $statusCount
+            $countColor = if ($statusCount -gt 0 -and $status -ge 400) {
+                'Red'
+            } elseif ($statusCount -gt 0 -and $status -ge 200 -and $status -lt 300) {
+                'Green'
+            } else { $null }
+            if ($countColor) {
+                $countText = $statusCount.ToString('N0')
+                Write-Host $formattedCount.Substring(0, $formattedCount.Length - $countText.Length) -NoNewline
+                Write-Host $countText -ForegroundColor $countColor -NoNewline
+            } else {
+                $errorStyle = if ($status -ge 400 -and $statusCount -gt 0) { @{ ForegroundColor = 'Red' } } else { @{} }
+                Write-Host $formattedCount @errorStyle -NoNewline
+            }
         }
-        $rowColor = if (@($identity.StatusCounts.Keys | Where-Object { $_ -ge 400 }).Count) { 'Red' } elseif (
-            @($identity.StatusCounts.Keys | Where-Object { $_ -ge 300 }).Count) { 'Yellow' } else { 'Green' }
-        Write-Host $tableRow -ForegroundColor $rowColor
+        Write-Host ''
     }
     if (!$identities.Count) { Write-Host '  Waiting for authenticated responses...' -ForegroundColor DarkGray }
     if ($identities.Count -gt 8) { Write-Host "  + $($identities.Count - 8) more process identities (see -Verbose / JSONL)" }

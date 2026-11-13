@@ -196,7 +196,8 @@ $Config = .\scripts\Get-AzureLocalConfig.ps1 -RequiredSettings deployment.resour
 $Subscription = $Config.deployment.subscriptionId
 $ResourceGroup = $Config.deployment.resourceGroupName
 $App = $Config.resources.containerAppName
-$Healthy = $Config.demo.healthyRevision
+$V1 = $Config.demo.healthyRevision
+$V2 = $Config.demo.candidateRevision
 
 # Validate the additional references needed for native Azure CLI commands.
 $Config = .\scripts\Get-AzureLocalConfig.ps1 -RequiredSettings resources.keyVaultName,demo.tokenSecretName,demo.tokenSecretVersion,resources.registryName,resources.registryEndpoint
@@ -239,9 +240,14 @@ The request generator never changes Azure resources or crashes a container.
 Engine types are cached by source hash, so script updates take effect on the
 next invocation even in a PowerShell session that loaded an older engine.
 It refreshes a compact traffic screen with concurrency, average completion rate,
-explicit error counts, and up to eight responding process identities. Each
-replica/process row has cumulative counts in dynamically added HTTP-status columns
-(for example `HTTP 200` and `HTTP 503`); error-status rows are highlighted red.
+and explicit error counts in a three-column ASCII grid with borders between
+rows, followed by up to eight responding process identities. Failure details
+appear inside the grid. Each replica/process row has cumulative counts in
+dynamically added HTTP-status columns (for example `HTTP 200` and `HTTP 503`).
+Nonzero success counts are green and nonzero error counts are red; labels,
+identity fields, request totals, and zero-error cells keep the normal terminal color.
+The presenter table omits process IDs; they remain available in verbose output,
+structured summaries, and JSONL diagnostics.
 Responses without a verified replica identity remain in the overall diagnostics
 rather than being attributed to an invented replica. Scaling
 and default combined-demo latency are displayed only with `-Verbose`; standalone
@@ -306,23 +312,23 @@ offstage, using new tags and baked version identifiers each time:
 $Context = Join-Path $PWD 'src\MvcMusicStore'
 $Dockerfile = Join-Path $Context 'Dockerfile'
 $BuildId = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
-$V1 = "ops-v1-$BuildId"
-$V2 = "ops-v2-$BuildId"
+$Version1 = "ops-v1-$BuildId"
+$Version2 = "ops-v2-$BuildId"
 az acr build --subscription $Subscription --registry $Config.resources.registryName `
-    --image "musicstore:$V1" --file $Dockerfile --platform linux/amd64 `
-    --build-arg "DEMO_VERSION=$V1" --build-arg DEMO_RELEASE_REGRESSION=false $Context
+    --image "musicstore:$Version1" --file $Dockerfile --platform linux/amd64 `
+    --build-arg "DEMO_VERSION=$Version1" --build-arg DEMO_RELEASE_REGRESSION=false $Context
 az acr build --subscription $Subscription --registry $Config.resources.registryName `
-    --image "musicstore:$V2" --file $Dockerfile --platform linux/amd64 `
-    --build-arg "DEMO_VERSION=$V2" --build-arg DEMO_RELEASE_REGRESSION=true $Context
+    --image "musicstore:$Version2" --file $Dockerfile --platform linux/amd64 `
+    --build-arg "DEMO_VERSION=$Version2" --build-arg DEMO_RELEASE_REGRESSION=true $Context
 
 # Existing named traffic must remain pinned before creating another revision.
 $Digest = az acr repository show --subscription $Subscription `
-    --name $Config.resources.registryName --image "musicstore:$V2" --query digest -o tsv
+    --name $Config.resources.registryName --image "musicstore:$Version2" --query digest -o tsv
 if ($Digest -notmatch '^sha256:[0-9a-f]{64}$') {
     throw 'Candidate digest lookup failed.'
 }
 az containerapp revision copy --subscription $Subscription `
-    -g $ResourceGroup -n $App --from-revision $Healthy --revision-suffix $V2 `
+    -g $ResourceGroup -n $App --from-revision $V1 --revision-suffix $Version2 `
     --image "$($Config.resources.registryEndpoint)/musicstore@$Digest" `
     --min-replicas 1 --max-replicas 1 --output none
 # Verify readiness and direct-revision browsing before changing public traffic.
@@ -390,7 +396,17 @@ Azure configuration. Before removing every server-level `0.0.0.0`–`0.0.0.0`
 [Azure-services rule](https://learn.microsoft.com/azure/azure-sql/database/firewall-configure?view=azuresql),
 it saves the firewall baseline to the ignored
 `config\sql-firewall-regression.local.json`. Public network access must already
-be enabled; other rules are not changed. An outstanding snapshot blocks another
+be enabled. Before opening SQL connections, the script detects the workstation's
+public IPv4 address over HTTPS and creates or updates the dedicated
+`Admin Access` rule to allow only that address. Other rules, including
+`DeploymentClient`, are preserved. `Admin Access` remains after restoration
+and is updated if the workstation changes networks. This needs SQL firewall
+write permissions; no configuration edit or redeployment is needed.
+Existing `PresenterLaptop` rules are not renamed or deleted automatically.
+After restoring any incident and verifying `Admin Access` works, remove the
+old rule if it is no longer needed.
+Propagation can take up to five minutes; if SQL access still fails, wait and
+rerun the same command. An outstanding snapshot blocks another
 fault so that the original baseline is never overwritten. `-WhatIf` previews
 without writing the snapshot or changing Azure.
 
@@ -399,9 +415,9 @@ To shorten firewall-cache latency, the script executes
 in every database listed in `resources.databaseNames` after removing the
 allowance and again after restoration. Your signed-in operator needs SQL
 administrator access or `KILL DATABASE CONNECTION` permission in those
-databases, plus workstation firewall access. No permissions are granted to the
+databases. Workstation firewall access is prepared automatically. No permissions are granted to the
 app. Before introduction, the script opens operator connections and checks
-permission in every database before changing firewall rules. These short-lived
+permission in every database before removing the Azure-services rules. These short-lived
 operator connections are unpooled; application pooling is unchanged. Tokens
 stay in memory and are not passed as command-line arguments.
 

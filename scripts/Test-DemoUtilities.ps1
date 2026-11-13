@@ -25,6 +25,20 @@ function Assert-Fails {
     Assert-True ($null -ne $message -and $message -match $Pattern) "Expected failure matching '$Pattern'; got '$message'."
 }
 
+function Get-ScreenText {
+    param([object[]]$Output)
+    $text = [Text.StringBuilder]::new()
+    foreach ($record in $Output) {
+        if ($record -is [Management.Automation.InformationRecord]) {
+            $null = $text.Append($record.MessageData.Message)
+            if (!$record.MessageData.NoNewLine) { $null = $text.AppendLine() }
+        } elseif ($record -is [Management.Automation.VerboseRecord]) {
+            $null = $text.AppendLine($record.Message)
+        }
+    }
+    $text.ToString()
+}
+
 if (!('DemoUtilitiesTests.Server' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -169,7 +183,7 @@ try {
     $summary = $displayOutput | Where-Object { $_.GetType().Name -eq 'Snapshot' }
     Assert-True ($summary.GetType().Namespace -like 'MusicStoreDemoTraffic_*') 'Traffic isolates the current engine from stale types already loaded in the terminal.'
     $engineType = $summary.GetType().Assembly.GetType("$($summary.GetType().Namespace).Engine")
-    $screen = ($displayOutput | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
+    $screen = Get-ScreenText $displayOutput
     Assert-True ($screen -match 'MUSIC STORE \| SCALE \| FINISHED') 'Traffic has a compact final screen.'
     Assert-True ($screen -match 'RESPONDING REPLICAS 1' -and $screen -match 'SUCCESS 12') 'Traffic displays response identity counts and successes.'
     Assert-True ($screen -notmatch 'LATENCY|p50|p95') 'Default scaling display omits latency.'
@@ -178,6 +192,95 @@ try {
     Assert-True ($screen -notmatch 'Unexpected|Candidate 503s|Timeouts|Cancelled|Counts cumulative|Requests cancelled|Instances above') 'Successful scaling display omits diagnostic counters and explanatory footer notes.'
     Assert-True ($summary.Success -eq 12 -and $summary.InFlight -eq 0) 'All bounded requests finish.'
     Assert-True ($screen -match 'HTTP 200' -and $summary.Identities[0].StatusCounts[200] -eq 12) 'Each replica/process row counts its successful HTTP responses.'
+    & {
+        $trafficAst = [Management.Automation.Language.Parser]::ParseFile($trafficScript, [ref]$null, [ref]$null)
+        $displayFunction = $trafficAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Show-TrafficStatus'
+        }, $true)
+        . ([scriptblock]::Create($displayFunction.Extent.Text))
+        $refreshScreen = $false
+        $Scenario = 'Demo'
+        $releaseChecks = $true
+        $DurationSeconds = 0
+        $MaxRequests = 0
+        $Concurrency = 32
+        $VerbosePreference = 'SilentlyContinue'
+        $snapshot = [pscustomobject]@{
+            StopReason = ''; ElapsedSeconds = 10; Completed = 15; InFlight = 32
+            Success = 10; Errors = 5; RecentSuccess = 4; RecentErrors = 2; RecentCompleted = 6
+            UnexpectedErrors = 2; Timeouts = 1; Cancellations = 1; OtherIdentityCount = 0
+            FailureCounts = @{ 'HttpError | HTTP 500' = 2 }
+            Identities = @(
+                [pscustomobject]@{
+                    Version = 'healthy'; Revision = 'v1'; Replica = 'v1-replica1'; Process = 'process1'; Count = 12
+                    StatusCounts = @{ 200 = 10; 500 = 2 }
+                },
+                [pscustomobject]@{
+                    Version = 'candidate'; Revision = 'v2'; Replica = 'v2-replica2'; Process = 'process2'; Count = 3
+                    StatusCounts = @{ 503 = 3 }
+                }
+            )
+        }
+        $display = @(Show-TrafficStatus $snapshot 6>&1)
+        $red = @($display | Where-Object { $_.MessageData.ForegroundColor -eq [ConsoleColor]::Red })
+        $green = @($display | Where-Object { $_.MessageData.ForegroundColor -eq [ConsoleColor]::Green })
+        Assert-True ($red.Count -eq 7) "Only numeric error totals, failure counts, and nonzero HTTP error counts are red (got $($red.Count): $(@($red | ForEach-Object { $_.MessageData.Message }) -join ', '))."
+        Assert-True ($green.Count -eq 3 -and
+            @($green | Where-Object { $_.MessageData.Message -in '10', '4' }).Count -eq 3) 'Cumulative and recent success totals and the nonzero HTTP 200 count are green.'
+        foreach ($entry in $red) {
+            Assert-True ($entry.MessageData.Message -match '^\s*[1-9][\d,]*\s*$') 'Red fragments contain only numeric error counts.'
+        }
+        foreach ($label in $display | Where-Object { $_.MessageData.Message -match 'ERRORS|Unexpected|Timeouts|FAILURE|HttpError|HTTP 500' }) {
+            Assert-True ($label.MessageData.ForegroundColor -ne [ConsoleColor]::Red) 'Failure labels and descriptions retain their normal color.'
+        }
+        $rendered = Get-ScreenText $display
+        Assert-True ($rendered -match 'TOTAL SUCCESS 10\s+\|\s+ERRORS 5' -and
+            $rendered -match 'LAST 10s\s+\|\s+SUCCESS 4\s+\|\s+ERRORS 2' -and
+            $rendered -match 'Unexpected 2\s+\|\s+Timeouts 1\s+\|\s+Cancelled 1') 'Fragmented coloring preserves complete summary lines.'
+        $gridLines = @($rendered -split '\r?\n' | Where-Object { $_ -match '^  [|+]' })
+        Assert-True ($gridLines.Count -eq 11) 'Five summary/failure rows have a top border and a separator after every row.'
+        $border = $gridLines[0]
+        foreach ($index in 0..($gridLines.Count - 1)) {
+            Assert-True ($gridLines[$index].Length -eq $border.Length) 'Every ASCII grid row and border has the same width.'
+            if ($index % 2 -eq 0) {
+                Assert-True ($gridLines[$index] -ceq $border -and $border -match '^  \+[-]+\+[-]+\+[-]+\+$') 'All horizontal separators use matching ASCII borders.'
+            } else {
+                foreach ($match in [regex]::Matches($border, '\+')) {
+                    Assert-True ($gridLines[$index][$match.Index] -eq '|') 'Vertical separators align with border intersections.'
+                }
+            }
+        }
+        Assert-True ($rendered -match '(?m)^\s+healthy\s+replica1\s+12\s+10\s+2\s+0\s*$' -and
+            $rendered -match '(?m)^\s+candidate\s+replica2\s+3\s+0\s+0\s+3\s*$') 'Mixed-success/error rows retain aligned counts, including missing-status zero cells.'
+        Assert-True ($rendered -notmatch 'PROCESS|process1|process2' -and $rendered -match 'REPLICA') 'The presenter table labels the instance column as REPLICA and omits process identifiers.'
+        $snapshot.FailureCounts = @{ 'HttpError | HTTP 500' = 1234 }
+        $largeFailure = @(Show-TrafficStatus $snapshot 6>&1)
+        $largeFailureCount = '{0:N0}' -f 1234
+        Assert-True (@($largeFailure | Where-Object {
+            $_.MessageData.ForegroundColor -eq [ConsoleColor]::Red -and $_.MessageData.Message -ceq $largeFailureCount
+        }).Count -eq 1 -and (Get-ScreenText $largeFailure).Contains("FAILURE $largeFailureCount")) 'Large failure counts remain formatted and red.'
+        $snapshot.Errors = 0
+        $snapshot.RecentErrors = 0
+        $snapshot.UnexpectedErrors = 0
+        $snapshot.Timeouts = 0
+        $snapshot.FailureCounts = @{}
+        $snapshot.Success = [int]::MaxValue
+        foreach ($identity in $snapshot.Identities) { $identity.StatusCounts = @{ 200 = 3; 503 = 0 } }
+        $Scenario = 'Release'
+        $snapshot | Add-Member P50Ms 10
+        $snapshot | Add-Member P95Ms 20
+        $healthyDisplay = @(Show-TrafficStatus $snapshot 6>&1)
+        Assert-True (@($healthyDisplay | Where-Object { $_.MessageData.ForegroundColor -eq [ConsoleColor]::Red }).Count -eq 0) 'Zero errors and zero-valued error cells never turn red.'
+        $healthyGreen = @($healthyDisplay | Where-Object { $_.MessageData.ForegroundColor -eq [ConsoleColor]::Green })
+        Assert-True ($healthyGreen.Count -eq 4 -and @($healthyGreen | Where-Object { $_.MessageData.Message -eq '3' }).Count -eq 2) 'All positive success counts remain green after recovery.'
+        $healthyGrid = @((Get-ScreenText $healthyDisplay) -split '\r?\n' | Where-Object { $_ -match '^  [|+]' })
+        Assert-True (@($healthyGrid | ForEach-Object Length | Select-Object -Unique).Count -eq 1 -and
+            (Get-ScreenText $healthyDisplay) -match 'LATENCY p50 10ms / p95 20ms') 'Grid widths adapt to large totals and optional latency without losing alignment.'
+        foreach ($entry in ($display | Where-Object { $_.MessageData.Message -match 'IN FLIGHT|SUCCESS |healthy|candidate' })) {
+            Assert-True ($entry.MessageData.ForegroundColor -eq $healthyDisplay[0].MessageData.ForegroundColor) 'Normal statistics and identity fields keep the default color during failures.'
+        }
+    }
     Assert-True ($server.MaxActive -ge 2 -and $server.MaxActive -le 4) 'Requests execute concurrently within the connection bound.'
     $records = @(Get-Content $results | ConvertFrom-Json)
     Assert-True ($records.Count -eq 12 -and $records[0].Replica -eq 'replica-test') 'JSONL includes request identity.'
@@ -189,9 +292,9 @@ try {
         Assert-True ($request.Headers['X-Demo-Run-Id'] -eq 'local-test') 'Run ID header.'
         Assert-True (!$request.Headers.ContainsKey('Cookie')) 'No cookies are replayed.'
     }
-    $verboseScreen = (& $trafficScript -ApplicationUrl $url -Scenario Scale -Concurrency 1 `
-        -DurationSeconds 5 -MaxRequests 1 -Verbose -NoClear 4>&1 6>&1 | Out-String)
-    Assert-True ($verboseScreen -match 'Unexpected 0 \| Timeouts 0 \| Cancelled 0' -and
+    $verboseScreen = Get-ScreenText @(& $trafficScript -ApplicationUrl $url -Scenario Scale -Concurrency 1 `
+        -DurationSeconds 5 -MaxRequests 1 -Verbose -NoClear 4>&1 6>&1)
+    Assert-True ($verboseScreen -match 'Unexpected 0\s+\|\s+Timeouts 0\s+\|\s+Cancelled 0' -and
         $verboseScreen -match 'Counts cumulative' -and $verboseScreen -match 'Requests cancelled' -and
         $verboseScreen -match 'Instances above') 'Verbose preserves diagnostic counters and explanatory footer notes.'
     Assert-True ($verboseScreen -notmatch 'Candidate 503s') 'Scaling does not display release-only counters even in verbose mode.'
@@ -199,7 +302,7 @@ try {
     $before = $server.Requests.Count
     $demoOutput = @(& $trafficScript -ConfigPath $trafficConfigPath -DurationSeconds 5 -MaxRequests 12 -PassThru -NoClear 6>&1)
     $demoSummary = $demoOutput | Where-Object { $_.GetType().Name -eq 'Snapshot' }
-    $demoScreen = $demoOutput -join "`n"
+    $demoScreen = Get-ScreenText $demoOutput
     Assert-True ($demoScreen -match 'MUSIC STORE \| LIVE TRAFFIC \| FINISHED' -and
         $demoScreen -match 'Concurrency 32') 'No Scenario argument starts the unified 32-concurrency presenter workload.'
     Assert-True ($demoSummary.Success -eq 12 -and $demoScreen -notmatch 'LATENCY|Candidate 503s|LAST 10s') 'Healthy unified traffic keeps the scaling display clean.'
@@ -226,8 +329,9 @@ try {
     $before = $server.Requests.Count
     $releaseOutput = @(& $trafficScript -ConfigPath $trafficConfigPath -Scenario Release -Concurrency 4 -DurationSeconds 10 -MaxRequests 55 -PassThru 6>&1)
     $summary = $releaseOutput | Where-Object { $_.GetType().Name -eq 'Snapshot' }
-    Assert-True (($releaseOutput -join "`n") -match 'HTTP 503' -and
-        ($releaseOutput -join "`n") -match '(?m)^\s+candidate\s+replica-test\s+\S+\s+55\s+55\s*$') 'The candidate row displays all 55 responses under HTTP 503.'
+    $releaseScreen = Get-ScreenText $releaseOutput
+    Assert-True ($releaseScreen -match 'HTTP 503' -and
+        $releaseScreen -match '(?m)^\s+candidate\s+replica-test\s+55\s+55\s*$') 'The candidate row displays all 55 responses under HTTP 503.'
     Assert-True ($summary.Identities[0].StatusCounts[503] -eq 55) 'Candidate HTTP status totals are retained in the structured snapshot.'
     Assert-True (($releaseOutput -join "`n") -notmatch 'Candidate 503s') 'The status table replaces separate candidate-specific labels.'
     Assert-True (($releaseOutput -join "`n") -notmatch 'Expected regression:') 'Traffic omits the regression explanation label.'
@@ -284,10 +388,10 @@ try {
     $server.Mode = 'split'
     $splitOutput = @(& $trafficScript -ApplicationUrl $url -CandidateVersion candidate -Concurrency 1 `
         -DurationSeconds 5 -MaxRequests 12 -NoClear -PassThru 6>&1)
-    $splitScreen = $splitOutput -join "`n"
+    $splitScreen = Get-ScreenText $splitOutput
     Assert-True ($splitScreen -match 'HTTP 200\s+HTTP 503' -and
-        $splitScreen -match '(?m)^\s+stable\s+replica-test\s+\S+\s+6\s+6\s+0\s*$' -and
-        $splitScreen -match '(?m)^\s+candidate\s+replica-test\s+\S+\s+6\s+0\s+6\s*$') 'The display aligns HTTP 200/503 columns and shows zero for statuses absent from each row.'
+        $splitScreen -match '(?m)^\s+stable\s+replica-test\s+6\s+6\s+0\s*$' -and
+        $splitScreen -match '(?m)^\s+candidate\s+replica-test\s+6\s+0\s+6\s*$') 'The display aligns HTTP 200/503 columns and shows zero for statuses absent from each row.'
     $server.Mode = 'mixed'
     $statusEngine = $engineType::new(
         $url, $env:MUSICSTORE_DEMO_TOKEN, 'status-counts-test', 'Demo', 'stable',
@@ -306,13 +410,14 @@ try {
     $server.Mode = 'stable503'
     $server.DelayMs = 0
     $safetyPath = Join-Path $work 'safety.jsonl'
-    $failureScreen = [Collections.Generic.List[string]]::new()
+    $failureScreen = [Collections.Generic.List[object]]::new()
     Assert-Fails {
         & $trafficScript -ApplicationUrl $url -Scenario Scale -Concurrency 4 -DurationSeconds 10 -MaxRequests 100 -OutputPath $safetyPath 6>&1 |
-            ForEach-Object { $failureScreen.Add([string]$_) }
+            ForEach-Object { $failureScreen.Add($_) }
     } 'Safety stop'
-    Assert-True (($failureScreen -join "`n") -match 'Unexpected [1-9]' -and
-        ($failureScreen -join "`n") -match 'FAILURE .*HttpError \| HTTP 503') 'Unexpected scaling failures show diagnostic counters and the failure category/status.'
+    $failureText = Get-ScreenText $failureScreen
+    Assert-True ($failureText -match 'Unexpected [1-9]' -and
+        $failureText -match 'FAILURE \d+\s+\|\s+HttpError\s+\|\s+HTTP 503') 'Unexpected scaling failures show diagnostic counters and the failure category/status.'
     $safety = @(Get-Content $safetyPath | ConvertFrom-Json)
     Assert-True ($safety.Count -ge 50 -and $safety.Count -lt 100) 'Safety stop occurs after the sample threshold and before the request limit.'
     Assert-True ($safety[0].StatusCode -eq 503 -and $safety[0].Replica -eq 'replica-test') '503 identity retained.'
@@ -321,15 +426,15 @@ try {
     } 'unexpected errors: 2x HttpError \| HTTP 503'
 
     $server.Mode = 'gateway503'
-    $gatewayScreen = [Collections.Generic.List[string]]::new()
+    $gatewayScreen = [Collections.Generic.List[object]]::new()
     $gatewayPath = Join-Path $work 'gateway.jsonl'
     Assert-Fails {
         & $trafficScript -ApplicationUrl $url -CandidateVersion candidate -Concurrency 1 -MaxRequests 2 -OutputPath $gatewayPath -NoClear 6>&1 |
-            ForEach-Object { $gatewayScreen.Add([string]$_) }
+            ForEach-Object { $gatewayScreen.Add($_) }
     } 'unexpected errors: 2x HttpError \| HTTP 503'
     $gatewayRecords = @(Get-Content $gatewayPath | ConvertFrom-Json)
     Assert-True (@($gatewayRecords | Where-Object { $_.Outcome -ne 'HttpError' -or $_.Replica }).Count -eq 0) 'Unidentified ingress 503s are HTTP errors, not setup failures or invented replica responses.'
-    Assert-True (($gatewayScreen -join "`n") -match 'LAST 10s \| SUCCESS 0 \| ERRORS 2') 'The recent-response window appears for outages without requiring previous candidate exposure.'
+    Assert-True ((Get-ScreenText $gatewayScreen) -match 'LAST 10s\s+\|\s+SUCCESS 0\s+\|\s+ERRORS 2') 'The recent-response window appears for outages without requiring previous candidate exposure.'
 
     foreach ($mode in 'missing', 'unauthorized', 'forbidden') {
         $server.Mode = $mode

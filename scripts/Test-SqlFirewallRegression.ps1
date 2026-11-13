@@ -45,15 +45,29 @@ function Reset-Fixture {
         FailOpenAt = 0
         FailFlushAt = 0
         FailToken = $false
+        ClientIp = '198.51.100.10'
+        FailIpLookup = $false
+        IpLookups = 0
+        PresenterWrites = 0
+        FailPresenterWrite = $false
+        IgnorePresenterWrite = $false
     }
     foreach ($rule in @(
         @{ name = 'AzureAllowance-A'; startIpAddress = '0.0.0.0'; endIpAddress = '0.0.0.0' },
         @{ name = 'AzureAllowance-B'; startIpAddress = '0.0.0.0'; endIpAddress = '0.0.0.0' },
-        @{ name = 'Workstation'; startIpAddress = '198.51.100.10'; endIpAddress = '198.51.100.10' },
+        @{ name = 'Admin Access'; startIpAddress = '198.51.100.10'; endIpAddress = '198.51.100.10' },
         @{ name = 'NotAnAzureAllowance'; startIpAddress = '0.0.0.0'; endIpAddress = '0.0.0.1' }
     )) {
         $script:mock.Rules.Add([pscustomobject]$rule)
     }
+}
+
+function Invoke-RestMethod {
+    param([string]$Uri, [int]$TimeoutSec)
+    if ($Uri -ne 'https://api.ipify.org' -or $TimeoutSec -ne 15) { throw 'Unexpected IP lookup.' }
+    $mock.IpLookups++
+    if ($mock.FailIpLookup) { throw 'Mock IP lookup failure' }
+    return $mock.ClientIp
 }
 
 function New-Object {
@@ -73,6 +87,9 @@ function New-Object {
     }
     $connection | Add-Member ScriptMethod Open {
         if ($this.AccessToken -ne 'mock-sql-token') { throw 'Missing operator token.' }
+        if (!($mock.Rules | Where-Object { $_.name -eq 'Admin Access' -and $_.startIpAddress -eq $mock.ClientIp -and $_.endIpAddress -eq $mock.ClientIp })) {
+            throw 'Presenter access must be established before SQL connections open.'
+        }
         if ($this.Ordinal -eq $mock.FailOpenAt) { throw 'Mock SQL open failure' }
     }
     $connection | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
@@ -140,8 +157,23 @@ function az {
         ConvertTo-Json -InputObject @($mock.Rules)
         return
     }
-    if (!(Test-Path -LiteralPath $snapshotPath -PathType Leaf)) { throw 'Mutation attempted without a recovery snapshot.' }
     $name = Get-Option $arguments '--name'
+    if ($command.StartsWith('sql server firewall-rule create ') -and $name -eq 'Admin Access' -and
+        (Get-Option $arguments '--start-ip-address') -ne '0.0.0.0') {
+        $mock.PresenterWrites++
+        if ($mock.FailPresenterWrite) { & pwsh -NoLogo -NoProfile -Command 'exit 17'; return }
+        if ((Get-Option $arguments '--start-ip-address') -ne $mock.ClientIp -or
+            (Get-Option $arguments '--end-ip-address') -ne $mock.ClientIp) { throw 'Presenter rule must allow only the detected IP.' }
+        if (!$mock.IgnorePresenterWrite) {
+            $existing = $mock.Rules | Where-Object name -EQ $name
+            if ($existing) { $null = $mock.Rules.Remove($existing) }
+            $mock.Rules.Add([pscustomobject]@{
+                name = $name; startIpAddress = $mock.ClientIp; endIpAddress = $mock.ClientIp
+            })
+        }
+        return
+    }
+    if (!(Test-Path -LiteralPath $snapshotPath -PathType Leaf)) { throw 'Mutation attempted without a recovery snapshot.' }
     if ($command.StartsWith('sql server firewall-rule delete ')) {
         if ($mock.Connections.Count -ne 2 -or @($mock.Connections | Where-Object Disposed).Count -ne 0) {
             throw 'Both operator connections must be opened and retained before removing firewall access.'
@@ -190,6 +222,7 @@ try {
     Assert-True (!(Test-Path -LiteralPath $snapshotPath)) 'WhatIf must not write a snapshot.'
     Assert-True ($mock.DeleteCount -eq 0 -and $mock.Rules.Count -eq 4) 'WhatIf must not change rules.'
     Assert-True ($mock.Connections.Count -eq 0 -and $mock.Flushes.Count -eq 0) 'WhatIf must not connect to SQL or refresh caches.'
+    Assert-True ($mock.IpLookups -eq 0 -and $mock.PresenterWrites -eq 0) 'WhatIf and no-op restore must not look up IPs or prepare access.'
 
     $output = @(& $faultScript -ConfigPath $configPath *>&1)
     Assert-True ($output.Count -eq 1) 'Default introduction must output only the presenter banner, with no extra stream messages.'
@@ -206,7 +239,7 @@ try {
     Assert-True ($mock.DeleteCount -eq 2 -and $mock.Rules.Count -eq 2) 'Disable every exact Azure-services allowance, regardless of name.'
     Assert-True ($mock.Flushes.Count -eq 2 -and @($mock.Flushes | Where-Object AllowancePresent).Count -eq 0) 'Refresh both user databases only after allowance removal.'
     Assert-True (@($mock.Connections | Where-Object { !$_.Disposed }).Count -eq 0) 'Dispose all operator connections after introduction.'
-    Assert-True (@($mock.Rules | Where-Object name -EQ 'Workstation').Count -eq 1) 'Preserve operator access.'
+    Assert-True (@($mock.Rules | Where-Object name -EQ 'Admin Access').Count -eq 1 -and $mock.PresenterWrites -eq 0) 'Preserve matching operator access without redundant writes.'
     Assert-True (@($mock.Rules | Where-Object name -EQ 'NotAnAzureAllowance').Count -eq 1) 'Require both start and end to equal 0.0.0.0.'
     Assert-Fails { & $faultScript -ConfigPath $configPath } 'already exists'
     Assert-True ((Get-Content -LiteralPath $snapshotPath -Raw) -ceq $savedJson) 'Repeated invocation must not overwrite the baseline.'
@@ -221,6 +254,91 @@ try {
     $output = @(& $faultScript -ConfigPath $configPath -Restore *>&1)
     Assert-True ($output.Count -eq 1 -and [string]$output[0] -ceq 'Nothing to restore. Misterious regression is already reset.') 'A repeated successful restore must be safe and presentation-friendly.'
     Assert-True ($mock.CreateCount -eq 2 -and $mock.DeleteCount -eq 2) 'Repeating restore must not introduce any additional writes.'
+
+    Reset-Fixture
+    ($mock.Rules | Where-Object name -EQ 'Admin Access').name = 'PresenterLaptop'
+    & $faultScript -ConfigPath $configPath -WhatIf
+    Assert-True ($mock.PresenterWrites -eq 0 -and $mock.IpLookups -eq 0) 'WhatIf must not add missing presenter access.'
+    & $faultScript -ConfigPath $configPath
+    $saved = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+    Assert-True ($mock.PresenterWrites -eq 1 -and $mock.DeleteCount -eq 2) 'Create missing presenter access before introducing the incident.'
+    Assert-True (@($saved.firewallRules | Where-Object name -EQ 'Admin Access').Count -eq 1) 'Snapshot includes the new rule name, including its space.'
+    Assert-True (@($mock.Rules | Where-Object name -EQ 'PresenterLaptop').Count -eq 1) 'Preparing access must preserve the legacy rule.'
+    & $faultScript -ConfigPath $configPath -Restore
+    Assert-True ($mock.PresenterWrites -eq 1 -and $mock.Rules.Count -eq 5) 'Restore retains presenter access without redundant writes.'
+
+    Reset-Fixture
+    $mock.ClientIp = '203.0.113.8'
+    & $faultScript -ConfigPath $configPath
+    Assert-True ($mock.PresenterWrites -eq 1) 'Update the dedicated presenter rule when the public IP changes.'
+    $mock.ClientIp = '203.0.113.9'
+    & $faultScript -ConfigPath $configPath -Restore -WhatIf
+    Assert-True ($mock.PresenterWrites -eq 1) 'Restore WhatIf must not update presenter access.'
+    & $faultScript -ConfigPath $configPath -Restore
+    Assert-True ($mock.PresenterWrites -eq 2 -and !(Test-Path $snapshotPath)) 'Restore prepares access from a changed IP before refreshing SQL caches.'
+
+    foreach ($failure in 'FailIpLookup', 'FailPresenterWrite', 'IgnorePresenterWrite') {
+        Reset-Fixture
+        $mock.ClientIp = '203.0.113.8'
+        $mock[$failure] = $true
+        Assert-Fails { & $faultScript -ConfigPath $configPath } 'lookup failure|17|could not be verified'
+        Assert-True ($mock.DeleteCount -eq 0 -and $mock.Connections.Count -eq 0 -and !(Test-Path $snapshotPath)) 'Access preparation failure must not inject an incident or open SQL.'
+    }
+    foreach ($invalidIp in '::1', '0.0.0.0', '127.0.0.1', '255.255.255.255', 'not-an-ip', '') {
+        Reset-Fixture
+        $mock.ClientIp = $invalidIp
+        Assert-Fails { & $faultScript -ConfigPath $configPath } 'valid workstation IPv4'
+        Assert-True ($mock.PresenterWrites -eq 0 -and $mock.DeleteCount -eq 0) 'Invalid detected IP must not mutate any firewall rule.'
+    }
+
+    Reset-Fixture
+    $presenter = $mock.Rules | Where-Object name -EQ 'Admin Access'
+    $presenter.startIpAddress = '0.0.0.0'
+    $presenter.endIpAddress = '0.0.0.0'
+    Assert-Fails { & $faultScript -ConfigPath $configPath } 'not a workstation rule'
+    Assert-True ($mock.PresenterWrites -eq 0 -and $mock.DeleteCount -eq 0) 'Never overwrite an Azure-services allowance named Admin Access.'
+
+    Reset-Fixture
+    $presenter = $mock.Rules | Where-Object name -EQ 'Admin Access'
+    $presenter.endIpAddress = '198.51.100.11'
+    Assert-Fails { & $faultScript -ConfigPath $configPath } 'not a single-address rule'
+    Assert-True ($mock.PresenterWrites -eq 0 -and $mock.DeleteCount -eq 0) 'Never overwrite an existing Admin Access address range.'
+
+    Reset-Fixture
+    ($mock.Rules | Where-Object name -EQ 'Admin Access').name = 'PresenterLaptop'
+    @{
+        schemaVersion = 1; serverId = $serverId; publicNetworkAccess = 'Enabled'
+        firewallRules = @($mock.Rules)
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $snapshotPath
+    $mock.Rules.RemoveRange(0, 2)
+    & $faultScript -ConfigPath $configPath -Restore -WhatIf
+    Assert-True ($mock.PresenterWrites -eq 0 -and $mock.CreateCount -eq 0) 'Restoring a legacy snapshot with WhatIf must not change rules.'
+    & $faultScript -ConfigPath $configPath -Restore
+    Assert-True (@($mock.Rules | Where-Object name -EQ 'Admin Access').Count -eq 1 -and
+        @($mock.Rules | Where-Object name -EQ 'PresenterLaptop').Count -eq 1 -and
+        !(Test-Path -LiteralPath $snapshotPath)) 'Restore an old snapshot and prepare the new rule without deleting the old rule.'
+
+    Reset-Fixture
+    ($mock.Rules | Where-Object name -EQ 'Admin Access').name = 'Workstation'
+    ($mock.Rules | Where-Object name -EQ 'AzureAllowance-A').name = 'Admin Access'
+    @{
+        schemaVersion = 1; serverId = $serverId; publicNetworkAccess = 'Enabled'
+        firewallRules = @($mock.Rules)
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $snapshotPath
+    $mock.Rules.RemoveRange(0, 2)
+    Assert-Fails { & $faultScript -ConfigPath $configPath -Restore } 'not a workstation rule'
+    Assert-True ($mock.PresenterWrites -eq 0 -and
+        @($mock.Rules | Where-Object { $_.name -eq 'Admin Access' -and $_.startIpAddress -eq '0.0.0.0' -and $_.endIpAddress -eq '0.0.0.0' }).Count -eq 1 -and
+        (Test-Path -LiteralPath $snapshotPath)) 'Restore never replaces an Azure-services allowance named Admin Access and retains its snapshot.'
+
+    Reset-Fixture
+    & $faultScript -ConfigPath $configPath
+    $mock.FailIpLookup = $true
+    Assert-Fails { & $faultScript -ConfigPath $configPath -Restore } 'recovery snapshot retained'
+    Assert-True ($mock.Rules.Count -eq 4 -and (Test-Path $snapshotPath)) 'Restore repairs the Azure-services allowance even if presenter access preparation fails.'
+    $mock.FailIpLookup = $false
+    & $faultScript -ConfigPath $configPath -Restore
+    Assert-True (!(Test-Path $snapshotPath)) 'Restore can finish after the IP lookup recovers.'
 
     Reset-Fixture
     $mock.Rules.RemoveRange(0, 2)
@@ -298,7 +416,7 @@ try {
         Reset-Fixture
         if ($failure -eq 'DenyPermission' -or $failure -eq 'FailToken') { $mock[$failure] = $true } else { $mock[$failure] = 2 }
         Assert-Fails { & $faultScript -ConfigPath $configPath } 'permission|open failure|17'
-        Assert-True ($mock.DeleteCount -eq 0 -and !(Test-Path $snapshotPath)) 'Preflight SQL/token failures must stop before changing the firewall.'
+        Assert-True ($mock.DeleteCount -eq 0 -and !(Test-Path $snapshotPath)) 'Preflight SQL/token failures must stop before removing Azure-services access.'
         Assert-True (@($mock.Connections | Where-Object { !$_.Disposed }).Count -eq 0) 'Dispose connections after failed SQL preflight.'
     }
     Reset-Fixture
